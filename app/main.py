@@ -10,6 +10,7 @@ import statistics
 import threading
 import time
 import zipfile
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date as Date, datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +19,8 @@ from xml.etree import ElementTree as ET
 from zoneinfo import ZoneInfo
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, PlainTextResponse
@@ -33,6 +36,8 @@ API_KEY = os.getenv("ENTSOE_API_KEY", "").strip()
 HTTP_TIMEOUT = int(os.getenv("ENTSOE_HTTP_TIMEOUT", "35"))
 REFRESH_SECONDS = int(os.getenv("ENTSOE_REFRESH_SECONDS", "300"))
 CACHE_SECONDS = int(os.getenv("ENTSOE_CACHE_SECONDS", "240"))
+CACHE_MAX_ENTRIES = max(32, min(2048, int(os.getenv("ENTSOE_CACHE_MAX_ENTRIES", "256"))))
+UPSTREAM_MAX_REQUESTS_PER_MINUTE = max(30, min(380, int(os.getenv("ENTSOE_MAX_REQUESTS_PER_MINUTE", "300"))))
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "").strip()
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 AUTH_ENABLED = bool(DASHBOARD_USERNAME and DASHBOARD_PASSWORD)
@@ -64,13 +69,24 @@ DEFAULT_NEIGHBORS = list(ALL_NEIGHBORS)
 BALANCING_AREAS = ["50HERTZ", "AMPRION", "TENNET_DE", "TRANSNETBW"]
 
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "entsoe-desk/1.0 (+local dashboard)"})
+SESSION.headers.update({"User-Agent": "entsoe-desk/4.3 (+public dashboard)"})
+SESSION.mount("https://", HTTPAdapter(max_retries=Retry(
+    total=2, connect=2, read=2, status=2, backoff_factor=0.35,
+    status_forcelist=(429, 500, 502, 503, 504), allowed_methods=frozenset({"GET"}),
+    respect_retry_after_header=True, raise_on_status=False,
+)))
 
 
 class TTLCache:
-    def __init__(self) -> None:
+    def __init__(self, max_entries: int = 256) -> None:
         self._d: dict[str, tuple[float, Any]] = {}
         self._lock = threading.Lock()
+        self._max_entries = max_entries
+
+    def _purge_expired(self, now: float) -> None:
+        for key, (expires, _) in list(self._d.items()):
+            if now >= expires:
+                self._d.pop(key, None)
 
     def get(self, key: str) -> Any | None:
         with self._lock:
@@ -85,7 +101,14 @@ class TTLCache:
 
     def set(self, key: str, value: Any, ttl: int) -> Any:
         with self._lock:
-            self._d[key] = (time.time() + ttl, value)
+            now = time.time()
+            self._purge_expired(now)
+            if key not in self._d and len(self._d) >= self._max_entries:
+                # Evict the entry that expires first. The cache is a protection
+                # against upstream fan-out, not a historical database.
+                oldest = min(self._d, key=lambda k: self._d[k][0])
+                self._d.pop(oldest, None)
+            self._d[key] = (now + ttl, value)
         return value
 
     def clear(self) -> None:
@@ -93,9 +116,36 @@ class TTLCache:
             self._d.clear()
 
 
-CACHE = TTLCache()
-CACHE_LOCKS: dict[str, threading.Lock] = {}
+CACHE = TTLCache(CACHE_MAX_ENTRIES)
+CACHE_LOCKS: dict[str, list[Any]] = {}  # key -> [Lock, refcount]
 CACHE_LOCKS_GUARD = threading.Lock()
+
+
+class SlidingWindowLimiter:
+    """Process-local guardrail for the public dashboard's ENTSO-E fan-out."""
+    def __init__(self, limit: int, window_seconds: float = 60.0) -> None:
+        self.limit = limit
+        self.window = window_seconds
+        self._hits: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def acquire(self, max_wait: float = 5.0) -> None:
+        deadline = time.monotonic() + max_wait
+        while True:
+            now = time.monotonic()
+            with self._lock:
+                while self._hits and now - self._hits[0] >= self.window:
+                    self._hits.popleft()
+                if len(self._hits) < self.limit:
+                    self._hits.append(now)
+                    return
+                wait_for = max(0.05, self.window - (now - self._hits[0]))
+            if now + wait_for > deadline:
+                raise RuntimeError("ENTSO-E upstream request budget temporarily exhausted; retry shortly")
+            time.sleep(min(wait_for, 0.5))
+
+
+UPSTREAM_LIMITER = SlidingWindowLimiter(UPSTREAM_MAX_REQUESTS_PER_MINUTE)
 
 
 def local_name(tag: str) -> str:
@@ -182,6 +232,10 @@ def entsoe_request(params: dict[str, Any], start: datetime, end: datetime) -> by
             "periodEnd": end.astimezone(UTC).strftime("%Y%m%d%H00"),
         }
     )
+    # The public UI can generate many fan-out calls. Keep a margin below the
+    # Transparency Platform's published per-IP request ceiling and fail cleanly
+    # instead of letting arbitrary visitors hammer the upstream service.
+    UPSTREAM_LIMITER.acquire()
     try:
         r = SESSION.get(ENDPOINT, params=payload, timeout=HTTP_TIMEOUT)
     except requests.RequestException as e:
@@ -190,14 +244,20 @@ def entsoe_request(params: dict[str, Any], start: datetime, end: datetime) -> by
         msg = safe_error_text(r.content) or f"HTTP {r.status_code}"
         msg = msg.replace(API_KEY, "***")
         raise RuntimeError(f"ENTSO-E API: {msg}")
-    # Since 2025 ENTSO-E sometimes returns HTTP 200 for no-data messages.
-    ctype = r.headers.get("content-type", "")
-    if "xml" in ctype and b"No matching data found" in r.content:
+    # ENTSO-E can return HTTP 200 for a no-data acknowledgement. ZIP endpoints
+    # start with PK; XML/text responses can be checked cheaply without parsing.
+    if r.content[:2] != b"PK" and b"No matching data found" in r.content:
         raise LookupError("No matching data found")
     return r.content
 
 
 def parse_timeseries(content: bytes) -> list[dict[str, Any]]:
+    """Parse common ENTSO-E point time series, including R3 A03 block curves.
+
+    Since the R3 migrations many datasets use curveType A03: omitted positions
+    mean "repeat the previous value". Treating those positions as missing makes
+    current data look artificially jumpy, especially cross-border flows.
+    """
     rows: list[dict[str, Any]] = []
     for doc in xml_documents(content):
         try:
@@ -210,20 +270,22 @@ def parse_timeseries(content: bytes) -> list[dict[str, Any]]:
             psr_type = text_of(ts, "psrType", "psrtype")
             business_type = text_of(ts, "businessType", "businesstype")
             flow_direction = text_of(ts, "flowDirection.direction", "flowdirection.direction")
+            curve_type = text_of(ts, "curveType", "curvetype")
             in_domain = text_of(ts, "in_Domain.mRID", "in_domain.mrid", "inBiddingZone_Domain.mRID", "inbiddingzone_domain.mrid")
             out_domain = text_of(ts, "out_Domain.mRID", "out_domain.mrid", "outBiddingZone_Domain.mRID", "outbiddingzone_domain.mrid")
             is_consumption = any(local_name(n.tag) == "outbiddingzone_domain.mrid" for n in ts.iter())
             for period in [n for n in ts.iter() if local_name(n.tag) == "period"]:
                 start_txt = text_of(period, "start", "timeInterval.start", "timeinterval.start")
+                end_txt = text_of(period, "end", "timeInterval.end", "timeinterval.end")
                 resolution_txt = text_of(period, "resolution")
                 if not start_txt:
                     continue
                 pstart = parse_dt(start_txt)
+                pend = parse_dt(end_txt) if end_txt else None
                 step = parse_iso_duration(resolution_txt)
+                parsed_points: list[tuple[int, float, str | None]] = []
                 for point in [n for n in period.iter() if local_name(n.tag) == "point"]:
                     pos_txt = text_of(point, "position")
-                    if not pos_txt:
-                        continue
                     value_txt = text_of(
                         point,
                         "quantity",
@@ -233,56 +295,64 @@ def parse_timeseries(content: bytes) -> list[dict[str, Any]]:
                         "activation_Price.amount",
                         "activation_price.amount",
                     )
-                    if value_txt is None:
+                    if not pos_txt or value_txt is None:
                         continue
                     try:
-                        value = float(value_txt.replace(",", ""))
                         pos = int(pos_txt)
+                        value = float(value_txt.replace(",", ""))
                     except ValueError:
                         continue
-                    ts_utc = pstart + (pos - 1) * step
-                    category = text_of(
-                        point,
-                        "imbalance_Price.category",
-                        "imbalance_price.category",
-                        "price.category",
-                    )
-                    rows.append(
-                        {
-                            "ts": ts_utc.astimezone(BERLIN),
-                            "value": value,
-                            "psr": psr_type,
-                            "business": business_type,
-                            "direction": flow_direction,
-                            "category": category,
-                            "in_domain": in_domain,
-                            "out_domain": out_domain,
-                            "resolution": resolution_txt,
-                            "created": doc_created,
-                            "revision": revision,
+                    category = text_of(point, "imbalance_Price.category", "imbalance_price.category", "price.category")
+                    parsed_points.append((pos, value, category))
+                parsed_points.sort(key=lambda x: x[0])
+                for idx, (pos, value, category) in enumerate(parsed_points):
+                    repeat = 1
+                    if curve_type == "A03":
+                        if idx + 1 < len(parsed_points):
+                            repeat = max(1, parsed_points[idx + 1][0] - pos)
+                        elif pend:
+                            repeat = max(1, int((pend - (pstart + (pos - 1) * step)) / step))
+                    for offset in range(repeat):
+                        ts_utc = pstart + (pos - 1 + offset) * step
+                        if pend and ts_utc >= pend:
+                            break
+                        rows.append({
+                            "ts": ts_utc.astimezone(BERLIN), "value": value, "psr": psr_type,
+                            "business": business_type, "direction": flow_direction, "category": category,
+                            "in_domain": in_domain, "out_domain": out_domain, "resolution": resolution_txt,
+                            "curve_type": curve_type, "created": doc_created, "revision": revision,
                             "consumption": is_consumption,
-                        }
-                    )
+                        })
     return rows
+
+def _row_rank(r: dict[str, Any]) -> tuple[int, datetime]:
+    try:
+        rev = int(r.get("revision") or 0)
+    except (TypeError, ValueError):
+        rev = 0
+    try:
+        created = parse_dt(r.get("created")) if r.get("created") else datetime.min.replace(tzinfo=UTC)
+    except Exception:
+        created = datetime.min.replace(tzinfo=UTC)
+    return rev, created
 
 
 def series(rows: list[dict[str, Any]], psr: str | None = None, consumption: bool | None = None) -> dict[datetime, float]:
-    out: dict[datetime, float] = {}
+    chosen: dict[datetime, tuple[tuple[int, datetime], float]] = {}
     for r in rows:
         if psr and r.get("psr") != psr:
             continue
         if consumption is not None and bool(r.get("consumption")) != consumption:
             continue
-        out[r["ts"]] = float(r["value"])
-    return out
+        rank = _row_rank(r)
+        t = r["ts"]
+        if t not in chosen or rank >= chosen[t][0]:
+            chosen[t] = (rank, float(r["value"]))
+    return {t: rv[1] for t, rv in chosen.items()}
 
 
 def flow_series(rows: list[dict[str, Any]]) -> dict[datetime, float]:
-    out: dict[datetime, float] = {}
-    for r in rows:
-        out[r["ts"]] = float(r["value"])
-    return out
-
+    return series(rows)
 
 def as_points(s: dict[datetime, float]) -> list[dict[str, Any]]:
     return [{"t": k.isoformat(), "v": round(v, 3)} for k, v in sorted(s.items())]
@@ -428,19 +498,33 @@ def cached(key: str, ttl: int, force: bool, fn):
         if hit is not None:
             return hit
     with CACHE_LOCKS_GUARD:
-        lock = CACHE_LOCKS.setdefault(key, threading.Lock())
-    with lock:
+        entry = CACHE_LOCKS.get(key)
+        if entry is None:
+            entry = [threading.Lock(), 0]
+            CACHE_LOCKS[key] = entry
+        entry[1] += 1
+        lock = entry[0]
+    lock.acquire()
+    try:
         if not force:
             hit = CACHE.get(key)
             if hit is not None:
                 return hit
         value = fn()
         return CACHE.set(key, value, ttl)
+    finally:
+        lock.release()
+        with CACHE_LOCKS_GUARD:
+            current = CACHE_LOCKS.get(key)
+            if current is entry:
+                current[1] -= 1
+                if current[1] <= 0:
+                    CACHE_LOCKS.pop(key, None)
 
 
 def fetch_renewables(day: str | None, force: bool = False) -> dict[str, Any]:
     start, end, d = day_bounds(day)
-    key = f"renewables:v4:{d.isoformat()}"
+    key = f"renewables:v4.3:{d.isoformat()}"
 
     def maybe_forecast(process_type: str) -> list[dict[str, Any]]:
         try:
@@ -461,10 +545,11 @@ def fetch_renewables(day: str | None, force: bool = False) -> dict[str, Any]:
         )
         actual_rows = parse_timeseries(actual_b)
 
-        # ENTSO-E 14.1.D process types:
-        # A01 = fixed day-ahead snapshot (18:00 D-1)
-        # A40 = fixed intraday snapshot (08:00 D)
-        # A18 = current / latest updated forecast
+        # ENTSO-E 14.1.D process types. A01 is the fixed D-1 18:00
+        # day-ahead snapshot, A40 the fixed D 08:00 intraday snapshot and
+        # A18 the current/latest forecast. We also expose document creation
+        # times as metadata because transport/revision timestamps can differ
+        # slightly from the regulatory snapshot clock.
         da_rows = maybe_forecast("A01")
         intraday_rows = maybe_forecast("A40")
         current_rows = maybe_forecast("A18")
@@ -473,10 +558,11 @@ def fetch_renewables(day: str | None, force: bool = False) -> dict[str, Any]:
             "date": d.isoformat(),
             "series": {},
             "updated": datetime.now(BERLIN).isoformat(),
+            "scope": {"area": "DE", "type": "Member State", "eic": AREAS["DE"]},
             "forecast_definitions": {
-                "day_ahead": "A01 · fixed forecast at 18:00 D-1",
-                "intraday": "A40 · fixed forecast at 08:00 delivery day",
-                "current": "A18 · latest available forecast update",
+                "day_ahead": "A01 · fixed D-1 18:00 day-ahead snapshot",
+                "intraday": "A40 · fixed D 08:00 intraday snapshot",
+                "current": "A18 · current / latest forecast",
             },
         }
 
@@ -557,7 +643,7 @@ def fetch_renewables(day: str | None, force: bool = False) -> dict[str, Any]:
 
 def fetch_load(day: str | None, force: bool = False) -> dict[str, Any]:
     start, end, d = day_bounds(day)
-    key = f"load:v4:{d.isoformat()}"
+    key = f"load:v4.3:{d.isoformat()}"
 
     def work():
         actual_b = entsoe_request(
@@ -582,6 +668,7 @@ def fetch_load(day: str | None, force: bool = False) -> dict[str, Any]:
         return {
             "date": d.isoformat(),
             "updated": datetime.now(BERLIN).isoformat(),
+            "scope": {"area": "DE", "type": "Member State", "eic": AREAS["DE"]},
             "series": {
                 "Load Actual": as_points(actual),
                 "Load Forecast": as_points(forecast),
@@ -603,14 +690,37 @@ def fetch_load(day: str | None, force: bool = False) -> dict[str, Any]:
     return cached(key, CACHE_SECONDS, force, work)
 
 
-def _one_flow(doc_type: str, source: str, dest: str, start: datetime, end: datetime, contract: str | None = None) -> dict[datetime, float]:
+def _one_flow(doc_type: str, source: str, dest: str, start: datetime, end: datetime, contract: str | None = None) -> tuple[dict[datetime, float], str]:
     params = {"documentType": doc_type, "in_Domain": AREAS[dest], "out_Domain": AREAS[source]}
     if contract:
         params["contract_MarketAgreement.Type"] = contract
     try:
-        return flow_series(parse_timeseries(entsoe_request(params, start, end)))
+        values = flow_series(parse_timeseries(entsoe_request(params, start, end)))
+        return values, "ok" if values else "empty"
+    except LookupError:
+        return {}, "no_data"
     except Exception:
-        return {}
+        return {}, "error"
+
+
+def _directional_net(imports: dict[datetime, float], import_state: str, exports: dict[datetime, float], export_state: str) -> tuple[dict[datetime, float], str]:
+    """Build import-minus-export without turning request errors/gaps into zero."""
+    if "error" in (import_state, export_state):
+        return {}, "error"
+    if import_state in ("no_data", "empty") and export_state in ("no_data", "empty"):
+        return {}, "no_data"
+    if imports and exports:
+        keys = set(imports) & set(exports)
+        return {t: imports[t] - exports[t] for t in keys}, "ok" if keys else "partial"
+    if imports and export_state in ("no_data", "empty"):
+        return dict(imports), "single_direction"
+    if exports and import_state in ("no_data", "empty"):
+        return {t: -v for t, v in exports.items()}, "single_direction"
+    return {}, "partial"
+
+
+def _value_at(s: dict[datetime, float], t: datetime) -> float | None:
+    return s.get(t)
 
 
 def fetch_borders(day: str | None, neighbors: list[str], force: bool = False) -> dict[str, Any]:
@@ -618,51 +728,79 @@ def fetch_borders(day: str | None, neighbors: list[str], force: bool = False) ->
     neighbors = [n for n in neighbors if n in ALL_NEIGHBORS]
     if not neighbors:
         neighbors = DEFAULT_NEIGHBORS
-    key = f"borders:v4:{d.isoformat()}:{','.join(neighbors)}"
+    key = f"borders:v4.3:{d.isoformat()}:{','.join(neighbors)}"
 
     def work():
-        result: dict[str, Any] = {"date": d.isoformat(), "updated": datetime.now(BERLIN).isoformat(), "borders": {}, "series": {}}
+        result: dict[str, Any] = {
+            "date": d.isoformat(), "updated": datetime.now(BERLIN).isoformat(),
+            "scope": {"hub": "DE_LU", "type": "Bidding Zone", "eic": AREAS["DE_LU"]},
+            "borders": {}, "series": {}, "coverage": {},
+        }
         tasks = {}
         with ThreadPoolExecutor(max_workers=8) as pool:
             for n in neighbors:
                 for metric, doc, contract in (("physical", "A11", None), ("scheduled", "A09", "A01")):
                     tasks[pool.submit(_one_flow, doc, n, "DE_LU", start, end, contract)] = (n, metric, "import")
                     tasks[pool.submit(_one_flow, doc, "DE_LU", n, start, end, contract)] = (n, metric, "export")
-            temp: dict[tuple[str, str, str], dict[datetime, float]] = {}
+            temp: dict[tuple[str, str, str], tuple[dict[datetime, float], str]] = {}
             for fut in as_completed(tasks):
                 temp[tasks[fut]] = fut.result()
 
-        totals_phys: dict[datetime, float] = {}
-        totals_sched: dict[datetime, float] = {}
+        phys_series: list[dict[datetime, float]] = []
+        sched_series: list[dict[datetime, float]] = []
+        complete_phys_names: list[str] = []
+        complete_sched_names: list[str] = []
         for n in neighbors:
-            imp_p = temp.get((n, "physical", "import"), {})
-            exp_p = temp.get((n, "physical", "export"), {})
-            imp_s = temp.get((n, "scheduled", "import"), {})
-            exp_s = temp.get((n, "scheduled", "export"), {})
-            net_p = {k: imp_p.get(k, 0.0) - exp_p.get(k, 0.0) for k in set(imp_p) | set(exp_p)}
-            net_s = {k: imp_s.get(k, 0.0) - exp_s.get(k, 0.0) for k in set(imp_s) | set(exp_s)}
-            result["borders"][n] = {"physical": as_points(net_p), "scheduled": as_points(net_s)}
-            totals_phys = add_series(totals_phys, net_p)
-            totals_sched = add_series(totals_sched, net_s)
+            imp_p, sip = temp.get((n, "physical", "import"), ({}, "error"))
+            exp_p, sep = temp.get((n, "physical", "export"), ({}, "error"))
+            imp_s, sis = temp.get((n, "scheduled", "import"), ({}, "error"))
+            exp_s, ses = temp.get((n, "scheduled", "export"), ({}, "error"))
+            net_p, state_p = _directional_net(imp_p, sip, exp_p, sep)
+            net_s, state_s = _directional_net(imp_s, sis, exp_s, ses)
+            result["borders"][n] = {
+                "physical": as_points(net_p), "scheduled": as_points(net_s),
+                "status": {"physical": state_p, "scheduled": state_s,
+                           "physical_import": sip, "physical_export": sep,
+                           "scheduled_import": sis, "scheduled_export": ses},
+            }
+            if net_p:
+                phys_series.append(net_p); complete_phys_names.append(n)
+            if net_s:
+                sched_series.append(net_s); complete_sched_names.append(n)
+
+        # A dashboard-wide Total is only valid when every selected border has a
+        # usable series at exactly the same MTU. No missing border becomes 0 MW.
+        all_phys_available = len(phys_series) == len(neighbors)
+        all_sched_available = len(sched_series) == len(neighbors)
+        totals_phys = add_series_complete(*phys_series) if all_phys_available else {}
+        totals_sched = add_series_complete(*sched_series) if all_sched_available else {}
         result["series"]["Net Physical Import"] = as_points(totals_phys)
         result["series"]["Net DA Schedule"] = as_points(totals_sched)
-        flow_delta = subtract_series(totals_phys, totals_sched)
+
         fp = latest_point(totals_phys)
-        dp = latest_point(flow_delta)
+        schedule_at_ref = _value_at(totals_sched, fp[0]) if fp else None
+        vs_da = fp[1] - schedule_at_ref if fp and schedule_at_ref is not None else None
         result["kpi"] = {
             "net_import_mw": fp[1] if fp else None,
             "as_of": fp[0].isoformat() if fp else None,
-            "vs_da_schedule_mw": dp[1] if dp else None,
+            "vs_da_schedule_mw": vs_da,
             "selected_borders": neighbors,
-            "changes": change_windows(totals_phys),
+            "complete_borders": len(complete_phys_names),
+            "changes": change_windows(totals_phys, fp[0] if fp else None),
+        }
+        result["coverage"] = {
+            "expected": len(neighbors), "physical_series": len(complete_phys_names),
+            "scheduled_series": len(complete_sched_names),
+            "physical_total_complete": bool(totals_phys),
+            "scheduled_total_complete": bool(totals_sched),
+            "physical_borders": complete_phys_names, "scheduled_borders": complete_sched_names,
         }
         result["freshness"] = {"physical_through": latest_timestamp(totals_phys)}
         return result
 
     return cached(key, max(CACHE_SECONDS, 600), force, work)
 
-
-def _parse_outage_docs(content: bytes, zone: str) -> list[dict[str, Any]]:
+def _parse_outage_docs(content: bytes, zone: str, document_type: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for doc in xml_documents(content):
         try:
@@ -670,13 +808,27 @@ def _parse_outage_docs(content: bytes, zone: str) -> list[dict[str, Any]]:
         except ET.ParseError:
             continue
         created = text_of(root, "createdDateTime", "createddatetime")
-        docstatus = text_of(root, "value")
+        doc_mrid = text_of(root, "mRID", "mrid")
+        revision = text_of(root, "revisionNumber", "revisionnumber")
+        # Explicitly read document status; a generic <value> lookup can pick an
+        # unrelated field from deep in the XML.
+        docstatus = None
+        for node in root.iter():
+            if local_name(node.tag) in ("docstatus", "marketobjectstatus"):
+                docstatus = text_of(node, "value", "status")
+                if docstatus:
+                    break
         for ts in elements(root, "timeseries"):
             business = text_of(ts, "businessType", "businesstype")
-            plant = text_of(ts, "production_RegisteredResource.name", "production_registeredresource.name", "registeredResource.name", "registeredresource.name") or "Unknown unit"
+            ts_mrid = text_of(ts, "mRID", "mrid")
+            resource_id = text_of(ts, "production_RegisteredResource.mRID", "production_registeredresource.mrid", "registeredResource.mRID", "registeredresource.mrid")
+            plant = text_of(ts, "production_RegisteredResource.name", "production_registeredresource.name", "registeredResource.name", "registeredresource.name") or resource_id or "Unknown unit"
             psr = text_of(ts, "psrType", "psrtype", "production_RegisteredResource.pSRType.psrType", "production_registeredresource.psrtype.psrtype")
             nominal_txt = text_of(ts, "nominalP", "nominalp")
-            nominal = float(nominal_txt) if nominal_txt and nominal_txt.replace('.', '', 1).isdigit() else None
+            try:
+                nominal = float(nominal_txt) if nominal_txt is not None else None
+            except ValueError:
+                nominal = None
             for period in [n for n in ts.iter() if local_name(n.tag) == "available_period"]:
                 start_txt = text_of(period, "start")
                 end_txt = text_of(period, "end")
@@ -697,139 +849,202 @@ def _parse_outage_docs(content: bytes, zone: str) -> list[dict[str, Any]]:
                         continue
                     seg_start = pstart + (pos - 1) * step
                     if i + 1 < len(pts):
-                        next_pos = int(text_of(pts[i + 1], "position") or pos + 1)
+                        try:
+                            next_pos = int(text_of(pts[i + 1], "position") or pos + 1)
+                        except ValueError:
+                            next_pos = pos + 1
                         seg_end = pstart + (next_pos - 1) * step
                     else:
                         seg_end = pend
-                    unavailable = max(0.0, (nominal or available) - available) if nominal is not None else None
+                    unavailable = max(0.0, nominal - available) if nominal is not None else None
                     out.append({
-                        "zone": zone,
-                        "start": seg_start.astimezone(BERLIN),
-                        "end": seg_end.astimezone(BERLIN),
-                        "available": available,
-                        "nominal": nominal,
-                        "unavailable": unavailable,
-                        "plant": plant,
-                        "psr": psr,
-                        "business": business,
-                        "created": created,
-                        "docstatus": docstatus,
+                        "zone": zone, "document_type": document_type, "doc_mrid": doc_mrid,
+                        "ts_mrid": ts_mrid, "resource_id": resource_id,
+                        "start": seg_start.astimezone(BERLIN), "end": seg_end.astimezone(BERLIN),
+                        "available": available, "nominal": nominal, "unavailable": unavailable,
+                        "plant": plant, "psr": psr, "business": business, "created": created,
+                        "revision": revision, "docstatus": docstatus,
                     })
     return out
+
+
+def _outage_rank(r: dict[str, Any]) -> tuple[int, datetime]:
+    return _row_rank(r)
+
+
+def _latest_outage_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep latest document revision, then remove cancelled/withdrawn events."""
+    docs: dict[tuple[Any, ...], tuple[tuple[int, datetime], str | None]] = {}
+    for r in rows:
+        doc_key = (r.get("zone"), r.get("document_type"), r.get("doc_mrid"))
+        rank = _outage_rank(r)
+        if doc_key not in docs or rank >= docs[doc_key][0]:
+            docs[doc_key] = (rank, r.get("docstatus"))
+    inactive_statuses = {"A09", "A13", "Cancelled", "Withdrawn", "cancelled", "withdrawn"}
+    chosen: dict[tuple[Any, ...], tuple[tuple[int, datetime], dict[str, Any]]] = {}
+    for r in rows:
+        doc_key = (r.get("zone"), r.get("document_type"), r.get("doc_mrid"))
+        latest_rank, latest_status = docs[doc_key]
+        if _outage_rank(r) != latest_rank or latest_status in inactive_statuses:
+            continue
+        seg_key = (doc_key, r.get("resource_id"), r.get("ts_mrid"), r.get("start"), r.get("end"))
+        if seg_key not in chosen or _outage_rank(r) >= chosen[seg_key][0]:
+            chosen[seg_key] = (_outage_rank(r), r)
+    return [x[1] for x in chosen.values()]
+
+
+def _fetch_outage_pages(zone: str, document_type: str, start: datetime, end: datetime, max_pages: int = 25) -> tuple[list[dict[str, Any]], str, int]:
+    """ENTSO-E outage endpoints are limited to 200 documents per request."""
+    rows: list[dict[str, Any]] = []
+    pages = 0
+    for offset in range(0, max_pages * 200, 200):
+        try:
+            content = entsoe_request({"documentType": document_type, "biddingZone_domain": AREAS[zone], "offset": offset}, start, end)
+        except LookupError:
+            return rows, ("ok" if rows else "no_data"), pages
+        except Exception:
+            return rows, "error", pages
+        pages += 1
+        docs = xml_documents(content)
+        parsed = _parse_outage_docs(content, zone, document_type)
+        rows.extend(parsed)
+        # A page below the API's 200-document cap is terminal.
+        if len(docs) < 200:
+            return rows, ("ok" if rows else "empty"), pages
+    return rows, "truncated", pages
 
 
 def fetch_outages(day: str | None, force: bool = False) -> dict[str, Any]:
     start, end, d = day_bounds(day)
     zones = ["DE_LU", "FR", "NL", "BE"]
-    key = f"outages:v4:{d.isoformat()}"
+    key = f"outages:v4.3:{d.isoformat()}"
 
     def work():
-        all_rows: list[dict[str, Any]] = []
-        errors: list[str] = []
-        no_data: list[str] = []
+        raw_by_source: dict[tuple[str, str], list[dict[str, Any]]] = {}
         source_status: dict[str, dict[str, str]] = {z: {"A77": "pending", "A80": "pending"} for z in zones}
+        page_counts: dict[str, dict[str, int]] = {z: {"A77": 0, "A80": 0} for z in zones}
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futs = {}
-            for z in zones:
-                for doc in ("A80", "A77"):
-                    futs[pool.submit(entsoe_request, {"documentType": doc, "biddingZone_domain": AREAS[z], "offset": 0}, start, end)] = (z, doc)
+            futs = {pool.submit(_fetch_outage_pages, z, doc, start, end): (z, doc) for z in zones for doc in ("A80", "A77")}
             for fut in as_completed(futs):
                 z, doc = futs[fut]
-                try:
-                    parsed = _parse_outage_docs(fut.result(), z)
-                    all_rows.extend(parsed)
-                    source_status[z][doc] = "ok" if parsed else "empty"
-                except LookupError:
-                    no_data.append(f"{z}:{doc}")
-                    source_status[z][doc] = "no_data"
-                except Exception as e:
-                    errors.append(f"{z}:{doc}: {e}")
-                    source_status[z][doc] = "error"
+                rows, status, pages = fut.result()
+                raw_by_source[(z, doc)] = _latest_outage_rows(rows)
+                source_status[z][doc] = status
+                page_counts[z][doc] = pages
+
+        # A80 = individual generation units. A77 = production units, which may
+        # aggregate several generation units. Summing both double-counts the same
+        # plant hierarchy, so A80 is primary and A77 is only a zone-level fallback.
+        selected_rows: list[dict[str, Any]] = []
+        selected_source: dict[str, str | None] = {}
+        complete = True
+        for z in zones:
+            a80 = raw_by_source.get((z, "A80"), [])
+            a77 = raw_by_source.get((z, "A77"), [])
+            a80_state = source_status[z]["A80"]
+            a77_state = source_status[z]["A77"]
+            if a80:
+                selected_rows.extend(a80); selected_source[z] = "A80"
+                # Partial pages are useful for diagnostics, but never sufficient
+                # for a numeric total that looks complete.
+                if a80_state != "ok": complete = False
+            elif a80_state in ("no_data", "empty") and a77:
+                selected_rows.extend(a77); selected_source[z] = "A77 fallback"
+                if a77_state != "ok": complete = False
+            elif a80_state in ("no_data", "empty") and a77_state in ("no_data", "empty"):
+                selected_source[z] = "no events"
+            else:
+                selected_source[z] = None; complete = False
+
+        def event_key(r: dict[str, Any]) -> tuple[Any, ...]:
+            # A document can contain more than one resource and more than one
+            # availability segment. Count each resource/outage once, not every
+            # segment as a separate event.
+            resource = r.get("resource_id") or r.get("ts_mrid") or r.get("plant")
+            document = r.get("doc_mrid") or r.get("ts_mrid") or resource
+            return (r.get("zone"), r.get("document_type"), document, resource)
+
+        def active_event_rows(rows: list[dict[str, Any]], t: datetime) -> list[dict[str, Any]]:
+            chosen: dict[tuple[Any, ...], dict[str, Any]] = {}
+            for r in rows:
+                if r.get("unavailable") is None or not (r["start"] <= t < r["end"]):
+                    continue
+                if float(r.get("unavailable") or 0) <= 0:
+                    continue
+                k = event_key(r)
+                # If the same logical event has overlapping segments, retain the
+                # largest unavailable value instead of double-counting it.
+                if k not in chosen or float(r["unavailable"]) > float(chosen[k]["unavailable"]):
+                    chosen[k] = r
+            return list(chosen.values())
 
         grid = [start + timedelta(minutes=15 * i) for i in range(int((end - start).total_seconds() // 900))]
-        by_zone = {z: {} for z in zones}
+        by_zone: dict[str, dict[datetime, float]] = {z: {} for z in zones}
         for z in zones:
-            zr = [r for r in all_rows if r["zone"] == z and r.get("unavailable") is not None]
+            zr = [r for r in selected_rows if r["zone"] == z and r.get("unavailable") is not None]
             for t in grid:
-                by_zone[z][t] = sum(float(r["unavailable"]) for r in zr if r["start"] <= t < r["end"])
-        total_series = add_series_complete(*(by_zone[z] for z in zones)) if zones else {}
+                by_zone[z][t] = sum(float(r["unavailable"]) for r in active_event_rows(zr, t))
+        total_series = add_series_complete(*(by_zone[z] for z in zones)) if complete else {}
 
         now = datetime.now(BERLIN)
-        if d < now.date():
-            ref = end - timedelta(minutes=15)
-        elif d > now.date():
-            ref = start
-        else:
-            ref = now
+        ref = end - timedelta(minutes=15) if d < now.date() else start if d > now.date() else now
+        active_rows = active_event_rows(selected_rows, ref)
+        upcoming_candidates = [r for r in selected_rows if r.get("unavailable") is not None and r["start"] > ref and float(r.get("unavailable") or 0) > 0]
+        # One row per logical event for counts and the table's first occurrence.
+        reportable_by_event: dict[tuple[Any, ...], dict[str, Any]] = {}
+        upcoming_by_event: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for r in selected_rows:
+            if r.get("unavailable") is None or float(r.get("unavailable") or 0) <= 0:
+                continue
+            k = event_key(r)
+            if k not in reportable_by_event or r["start"] < reportable_by_event[k]["start"]:
+                reportable_by_event[k] = r
+        for r in upcoming_candidates:
+            k = event_key(r)
+            if k not in upcoming_by_event or r["start"] < upcoming_by_event[k]["start"]:
+                upcoming_by_event[k] = r
+        reportable_rows = list(reportable_by_event.values())
+        upcoming_rows = list(upcoming_by_event.values())
+        display_rows = sorted(active_rows + upcoming_rows, key=lambda r: (0 if r in active_rows else 1, r["start"], -float(r.get("unavailable") or 0)))
 
-        active_rows = [
-            r for r in all_rows
-            if r.get("unavailable") is not None and r["start"] <= ref < r["end"] and float(r["unavailable"] or 0) > 0
-        ]
-        upcoming_rows = [
-            r for r in all_rows
-            if r.get("unavailable") is not None and r["start"] > ref and float(r["unavailable"] or 0) > 0
-        ]
-        display_rows = sorted(
-            active_rows + upcoming_rows,
-            key=lambda r: (0 if r in active_rows else 1, r["start"], -float(r.get("unavailable") or 0)),
-        )
-        top = sorted(
-            [r for r in all_rows if r.get("unavailable") is not None and float(r.get("unavailable") or 0) > 0],
-            key=lambda r: float(r.get("unavailable") or 0),
-            reverse=True,
-        )[:12]
-
-        current_total = sum(float(r["unavailable"]) for r in active_rows)
-        hard_failure = bool(errors) and not all_rows and len(errors) + len(no_data) >= len(zones) * 2
+        current_total = sum(float(r["unavailable"]) for r in active_rows) if complete else None
         largest_active = max(active_rows, key=lambda r: float(r.get("unavailable") or 0), default=None)
         next_event = min(upcoming_rows, key=lambda r: r["start"], default=None)
+        errors = [f"{z}:{doc}:{state}" for z, docs in source_status.items() for doc, state in docs.items() if state in ("error", "truncated")]
+        no_data = [f"{z}:{doc}" for z, docs in source_status.items() for doc, state in docs.items() if state in ("no_data", "empty")]
 
         return {
-            "date": d.isoformat(),
-            "updated": datetime.now(BERLIN).isoformat(),
-            "series": {z: as_points(by_zone[z]) for z in zones},
+            "date": d.isoformat(), "updated": datetime.now(BERLIN).isoformat(),
+            "series": {z: as_points(by_zone[z]) if complete else [] for z in zones},
             "total_series": as_points(total_series),
-            "top": [
-                {
-                    "zone": r["zone"], "plant": r["plant"], "psr": r["psr"],
-                    "unavailable_mw": round(float(r["unavailable"] or 0), 1),
-                    "start": r["start"].isoformat(), "end": r["end"].isoformat(), "business": r["business"],
-                    "active": r in active_rows,
-                }
-                for r in display_rows[:12]
-            ],
+            "top": [{
+                "zone": r["zone"], "plant": r["plant"], "psr": r["psr"], "source": r["document_type"],
+                "unavailable_mw": round(float(r["unavailable"] or 0), 1),
+                "start": r["start"].isoformat(), "end": r["end"].isoformat(), "business": r["business"],
+                "active": r in active_rows,
+            } for r in display_rows[:12]],
             "kpi": {
-                "unavailable_mw": None if hard_failure else round(current_total, 1),
+                "unavailable_mw": round(current_total, 1) if current_total is not None else None,
                 "as_of": ref.isoformat(),
-                "scope": "A77+A80 · DE-LU + FR + NL + BE",
-                "reportable_events": len(top),
-                "active_events": len(active_rows),
+                "scope": "A80 generation units; A77 fallback · DE-LU + FR + NL + BE",
+                "coverage_complete": complete,
+                "reportable_events": len(reportable_rows), "active_events": len(active_rows),
                 "largest_active_mw": round(float(largest_active["unavailable"]), 1) if largest_active else None,
                 "largest_active_unit": largest_active["plant"] if largest_active else None,
                 "next_event_at": next_event["start"].isoformat() if next_event else None,
                 "next_event_mw": round(float(next_event["unavailable"]), 1) if next_event else None,
                 "next_event_unit": next_event["plant"] if next_event else None,
-                "changes": change_windows(total_series, ref),
+                "changes": change_windows(total_series, ref) if complete else {"d15_mw": None, "d30_mw": None, "d60_mw": None},
             },
-            "source_status": source_status,
-            "errors": errors,
-            "no_data": no_data,
+            "source_status": source_status, "selected_source": selected_source,
+            "page_counts": page_counts, "errors": errors, "no_data": no_data,
+            "methodology": "A80 is used when available. A77 is only a fallback because a production unit can aggregate generation units; A77 and A80 are never added together.",
         }
 
     return cached(key, max(CACHE_SECONDS, 900), force, work)
 
-
-def _query_control_area_document(
-    document_type: str,
-    area: str,
-    start: datetime,
-    end: datetime,
-    extra: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], str]:
+def _query_control_area_document(document_type: str, area: str, start: datetime, end: datetime) -> tuple[list[dict[str, Any]], str]:
     params: dict[str, Any] = {"documentType": document_type, "controlArea_Domain": AREAS[area]}
-    if extra:
-        params.update(extra)
     try:
         rows = parse_timeseries(entsoe_request(params, start, end))
         for r in rows:
@@ -841,143 +1056,199 @@ def _query_control_area_document(
         return [], "error"
 
 
-def _query_balancing_doc_with_fallback(
-    document_type: str, start: datetime, end: datetime
-) -> tuple[list[dict[str, Any]], dict[str, str], str]:
-    """Query German control areas first, then DE/DE-LU aggregate fallbacks."""
+def _query_balancing_doc_with_fallback(document_type: str, start: datetime, end: datetime) -> tuple[list[dict[str, Any]], dict[str, str], str]:
+    """Prefer a complete four-control-area set; otherwise try aggregate scopes.
+
+    Returning a partial Germany aggregate as if it were complete can create a
+    plausible but wrong A86 volume. We therefore try DE-LU/DE before exposing a
+    partial control-area result, and callers can suppress partial numerics.
+    """
     statuses: dict[str, str] = {}
     rows: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=4) as pool:
         futs = {pool.submit(_query_control_area_document, document_type, area, start, end): area for area in BALANCING_AREAS}
         for fut in as_completed(futs):
             area = futs[fut]
-            r, status = fut.result()
-            statuses[area] = status
-            rows.extend(r)
-    if rows:
+            r, status = fut.result(); statuses[area] = status; rows.extend(r)
+    control_complete = bool(rows) and all(statuses.get(area) == "ok" for area in BALANCING_AREAS)
+    if control_complete:
         return rows, statuses, "German control areas"
-
-    for area in ("DE", "DE_LU"):
+    partial_rows = rows
+    for area in ("DE_LU", "DE"):
         r, status = _query_control_area_document(document_type, area, start, end)
         statuses[area] = status
         if r:
             return r, statuses, area
+    if partial_rows:
+        return partial_rows, statuses, "German control areas (partial)"
     return [], statuses, "none"
+
+
+def parse_aggregated_bids(content: bytes, process_type: str) -> list[dict[str, Any]]:
+    """Parse GL EB 12.3.E A24: quantity=offered, secondaryQuantity=activated."""
+    out: list[dict[str, Any]] = []
+    for doc in xml_documents(content):
+        try:
+            root = ET.fromstring(doc)
+        except ET.ParseError:
+            continue
+        created = text_of(root, "createdDateTime", "createddatetime")
+        revision = text_of(root, "revisionNumber", "revisionnumber")
+        for ts in elements(root, "timeseries"):
+            direction = text_of(ts, "flowDirection.direction", "flowdirection.direction")
+            mrid = text_of(ts, "mRID", "mrid")
+            curve = text_of(ts, "curveType", "curvetype")
+            for period in [n for n in ts.iter() if local_name(n.tag) == "period"]:
+                st = text_of(period, "start", "timeInterval.start", "timeinterval.start")
+                en = text_of(period, "end", "timeInterval.end", "timeinterval.end")
+                res = text_of(period, "resolution")
+                if not st:
+                    continue
+                pstart = parse_dt(st); pend = parse_dt(en) if en else None; step = parse_iso_duration(res)
+                points = []
+                for point in [n for n in period.iter() if local_name(n.tag) == "point"]:
+                    pos_txt = text_of(point, "position")
+                    offered_txt = text_of(point, "quantity")
+                    activated_txt = text_of(point, "secondaryQuantity", "secondaryquantity")
+                    if not pos_txt:
+                        continue
+                    try:
+                        pos = int(pos_txt)
+                        offered = float(offered_txt) if offered_txt is not None else None
+                        activated = float(activated_txt) if activated_txt is not None else None
+                    except ValueError:
+                        continue
+                    points.append((pos, offered, activated))
+                points.sort(key=lambda x: x[0])
+                for idx, (pos, offered, activated) in enumerate(points):
+                    repeat = 1
+                    if curve == "A03":
+                        if idx + 1 < len(points): repeat = max(1, points[idx+1][0]-pos)
+                        elif pend: repeat = max(1, int((pend-(pstart+(pos-1)*step))/step))
+                    for off in range(repeat):
+                        t = pstart + (pos-1+off)*step
+                        if pend and t >= pend: break
+                        out.append({"ts": t.astimezone(BERLIN), "direction": direction, "process": process_type,
+                                    "mrid": mrid, "offered": offered, "activated": activated,
+                                    "created": created, "revision": revision})
+    return out
+
+
+def _query_aggregated_bids(process_type: str, start: datetime, end: datetime) -> tuple[list[dict[str, Any]], str]:
+    try:
+        rows = parse_aggregated_bids(entsoe_request({"documentType": "A24", "area_Domain": AREAS["DE_LU"], "processType": process_type}, start, end), process_type)
+        return rows, "ok" if rows else "empty"
+    except LookupError:
+        return [], "no_data"
+    except Exception:
+        return [], "error"
+
+
+def _activation_series(rows: list[dict[str, Any]]) -> tuple[dict[datetime, float], dict[datetime, float], dict[datetime, float]]:
+    # Latest revision for each logical A24 point/mRID/direction.
+    chosen: dict[tuple[Any, ...], tuple[tuple[int, datetime], dict[str, Any]]] = {}
+    for r in rows:
+        key = (r.get("process"), r.get("mrid"), r.get("direction"), r.get("ts"))
+        rank = _row_rank(r)
+        if key not in chosen or rank >= chosen[key][0]: chosen[key] = (rank, r)
+    up: dict[datetime, float] = {}; down: dict[datetime, float] = {}
+    for _, r in chosen.values():
+        if r.get("activated") is None: continue
+        target = up if r.get("direction") == "A01" else down if r.get("direction") == "A02" else None
+        if target is not None: target[r["ts"]] = target.get(r["ts"], 0.0) + float(r["activated"])
+    if up and down:
+        keys = set(up) & set(down); net = {t: up[t]-down[t] for t in keys}
+    elif up:
+        net = dict(up)
+    elif down:
+        net = {t: -v for t, v in down.items()}
+    else:
+        net = {}
+    return up, down, net
 
 
 def fetch_balancing(day: str | None, force: bool = False) -> dict[str, Any]:
     start, end, d = day_bounds(day)
-    key = f"system-stress:v4:{d.isoformat()}"
+    key = f"balancing:v4.3:{d.isoformat()}"
 
     def work():
-        # A83 activated balancing energy; A96=aFRR, A97=mFRR.
-        a83_rows: list[dict[str, Any]] = []
-        a83_status: dict[str, str] = {}
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futs = {}
-            for area in BALANCING_AREAS:
-                for business in ("A96", "A97"):
-                    futs[pool.submit(_query_control_area_document, "A83", area, start, end, {"businessType": business})] = (area, business)
-            for fut in as_completed(futs):
-                area, business = futs[fut]
-                rows, status = fut.result()
-                a83_status[f"{area}:{business}"] = status
-                a83_rows.extend(rows)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fa = pool.submit(_query_aggregated_bids, "A51", start, end)  # aFRR
+            fm = pool.submit(_query_aggregated_bids, "A47", start, end)  # mFRR
+            afrr_rows, afrr_state = fa.result(); mfrr_rows, mfrr_state = fm.result()
+        afrr_up, afrr_down, afrr_net = _activation_series(afrr_rows)
+        mfrr_up, mfrr_down, mfrr_net = _activation_series(mfrr_rows)
+        activation_net = add_series_complete(afrr_net, mfrr_net) if afrr_net and mfrr_net else {}
 
-        a83_rows = latest_revision_rows(a83_rows, ("source_area", "business", "direction", "ts"))
-        afrr_rows = [r for r in a83_rows if r.get("business") == "A96"]
-        mfrr_rows = [r for r in a83_rows if r.get("business") == "A97"]
-        afrr = signed_quantity_series(afrr_rows)
-        mfrr = signed_quantity_series(mfrr_rows)
-        activation_net = add_series(afrr, mfrr)
-
-        # A85/A86 are ZIP/XML endpoints. Germany may not publish every balancing
-        # item on ENTSO-E; therefore source health is first-class UI information.
-        price_rows, a85_status, a85_scope = _query_balancing_doc_with_fallback("A85", start, end)
-        volume_rows, a86_status, a86_scope = _query_balancing_doc_with_fallback("A86", start, end)
-        price_rows = latest_revision_rows(price_rows, ("source_area", "category", "ts"))
-        volume_rows = latest_revision_rows(volume_rows, ("source_area", "business", "direction", "ts"))
+        price_rows_raw, a85_status, a85_scope = _query_balancing_doc_with_fallback("A85", start, end)
+        volume_rows_raw, a86_status, a86_scope = _query_balancing_doc_with_fallback("A86", start, end)
+        # A partial subset of the four German control areas is diagnostic data,
+        # not a Germany-wide total/price. Suppress the numeric series unless an
+        # aggregate DE-LU/DE fallback was available.
+        price_partial = a85_scope.endswith("(partial)")
+        volume_partial = a86_scope.endswith("(partial)")
+        price_rows = [] if price_partial else latest_revision_rows(price_rows_raw, ("source_area", "category", "ts"))
+        volume_rows = [] if volume_partial else latest_revision_rows(volume_rows_raw, ("source_area", "business", "direction", "ts"))
         imbalance_volume = signed_quantity_series(volume_rows)
-
         categories = {r.get("category") for r in price_rows}
         price_long = mean_series(price_rows, "A04") if "A04" in categories else {}
         price_short = mean_series(price_rows, "A05") if "A05" in categories else {}
         uncategorized_rows = [r for r in price_rows if not r.get("category")]
         price_single = mean_series(uncategorized_rows) if uncategorized_rows else {}
 
-        primary = imbalance_volume or activation_net
-        # A86 is an energy volume (MWh per imbalance settlement period / MTU),
-        # while legacy A83 activated balancing quantities are published in MW per
-        # balancing time unit. Do not imply they share a physical unit.
-        primary_basis = "A86 total imbalance volume" if imbalance_volume else "A83 net aFRR+mFRR activation" if activation_net else None
-        primary_unit = "MWh" if imbalance_volume else "MW" if activation_net else None
-        pp = latest_point(primary)
-
-        def latest_val(s: dict[datetime, float]) -> float | None:
-            p = latest_point(s)
-            return p[1] if p else None
-
-        def doc_state(rows: list[dict[str, Any]], statuses: dict[str, str]) -> str:
-            if rows:
-                return "ok"
-            if any(v == "error" for v in statuses.values()):
-                return "error"
+        def latest_val(ss: dict[datetime, float]) -> float | None:
+            pp = latest_point(ss); return pp[1] if pp else None
+        def doc_state(rows: list[dict[str, Any]], statuses: dict[str, str], scope: str) -> str:
+            if scope.endswith("(partial)"): return "partial"
+            if rows: return "ok"
+            if any(v == "error" for v in statuses.values()): return "error"
             return "no_data"
 
-        freshness_candidates = [
-            latest_point(activation_net), latest_point(imbalance_volume), latest_point(price_single),
-            latest_point(price_long), latest_point(price_short),
-        ]
-        freshness_points = [p for p in freshness_candidates if p]
-        freshest = max(freshness_points, key=lambda p: p[0]) if freshness_points else None
+        ivp = latest_point(imbalance_volume)
+        imbalance_state = None
+        if ivp:
+            imbalance_state = "surplus" if ivp[1] > 0 else "deficit" if ivp[1] < 0 else "balanced"
+        freshness_candidates = [latest_point(activation_net), latest_point(afrr_net), latest_point(mfrr_net), latest_point(imbalance_volume), latest_point(price_single), latest_point(price_long), latest_point(price_short)]
+        fresh = [p for p in freshness_candidates if p]
+        freshest = max(fresh, key=lambda p:p[0]) if fresh else None
+        activation_state = "ok" if activation_net else "partial" if (afrr_net or mfrr_net) else "error" if "error" in (afrr_state, mfrr_state) else "no_data"
 
         return {
-            "date": d.isoformat(),
-            "updated": datetime.now(BERLIN).isoformat(),
+            "date": d.isoformat(), "updated": datetime.now(BERLIN).isoformat(),
             "series": {
-                "aFRR net": as_points(afrr),
-                "mFRR net": as_points(mfrr),
-                "Net activation": as_points(activation_net),
-                "Net imbalance volume": as_points(imbalance_volume),
-                "Imbalance price": as_points(price_single),
-                "Imbalance price long": as_points(price_long),
-                "Imbalance price short": as_points(price_short),
+                "aFRR activated up": as_points(afrr_up), "aFRR activated down": as_points(afrr_down), "aFRR net": as_points(afrr_net),
+                "mFRR activated up": as_points(mfrr_up), "mFRR activated down": as_points(mfrr_down), "mFRR net": as_points(mfrr_net),
+                "Net activation": as_points(activation_net), "Net imbalance volume": as_points(imbalance_volume),
+                "Imbalance price": as_points(price_single), "Imbalance price long": as_points(price_long), "Imbalance price short": as_points(price_short),
             },
             "kpi": {
-                # system_stress_value is intentionally unit-aware. Keep the old
-                # field as a compatibility alias for older front-ends.
-                "system_stress_value": pp[1] if pp else None,
-                "system_stress_unit": primary_unit,
-                "system_stress_mw": pp[1] if pp else None,
-                "as_of": pp[0].isoformat() if pp else None,
-                "basis": primary_basis,
-                "changes": change_windows(primary),
-                "net_activation_mw": latest_val(activation_net),
-                "imbalance_volume_mwh": latest_val(imbalance_volume),
-                "imbalance_volume_mw": latest_val(imbalance_volume),
+                "imbalance_volume_mwh": ivp[1] if ivp else None, "imbalance_state": imbalance_state,
+                "as_of": ivp[0].isoformat() if ivp else None, "basis": "A86 total imbalance volume",
+                "changes": change_windows(imbalance_volume),
+                "net_activation_mw": latest_val(activation_net), "afrr_net_mw": latest_val(afrr_net), "mfrr_net_mw": latest_val(mfrr_net),
                 "imbalance_price_eur_mwh": latest_val(price_single),
-                "imbalance_price_long_eur_mwh": latest_val(price_long),
-                "imbalance_price_short_eur_mwh": latest_val(price_short),
+                "imbalance_price_long_eur_mwh": latest_val(price_long), "imbalance_price_short_eur_mwh": latest_val(price_short),
             },
             "freshness": {
                 "latest_through": freshest[0].isoformat() if freshest else None,
-                "activation_through": latest_timestamp(activation_net),
+                "activation_through": latest_timestamp(activation_net or afrr_net or mfrr_net),
                 "volume_through": latest_timestamp(imbalance_volume),
                 "price_through": latest_timestamp(price_single or price_short or price_long),
             },
             "sources": {
-                "A83": {"state": doc_state(a83_rows, a83_status), "label": "Activated balancing", "scope": "4 German control areas"},
-                "A85": {"state": doc_state(price_rows, a85_status), "label": "Imbalance price", "scope": a85_scope},
-                "A86": {"state": doc_state(volume_rows, a86_status), "label": "Imbalance volume", "scope": a86_scope},
+                "12.3.E": {"state": activation_state, "label": "Aggregated balancing energy bids", "scope": "DE-LU · A51 aFRR / A47 mFRR"},
+                "A85": {"state": doc_state(price_rows_raw, a85_status, a85_scope), "label": "Imbalance price", "scope": a85_scope},
+                "A86": {"state": doc_state(volume_rows_raw, a86_status, a86_scope), "label": "Total imbalance volume", "scope": a86_scope},
             },
-            "note": "System Stress combines ENTSO-E A83, A85 and A86 where published. A83 is shown in MW, A86 in MWh per ISP/MTU, and A85 in EUR/MWh. Missing source data is shown explicitly rather than rendered as zero.",
+            "activation_sources": {"A51_aFRR": afrr_state, "A47_mFRR": mfrr_state},
+            "note": "Legacy A83 was discontinued on 11 Dec 2025. Activation now uses GL EB 12.3.E (A24): A51 aFRR and A47 mFRR. A86 remains an energy volume in MWh; activation is MW and is never used as a unit-changing fallback for the headline KPI.",
         }
 
     return cached(key, max(CACHE_SECONDS, 600), force, work)
 
 app = FastAPI(
     title="ENTSO-E Desk",
-    version="1.0.0",
+    version="4.3.0",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -986,32 +1257,41 @@ app = FastAPI(
 
 @app.middleware("http")
 async def optional_basic_auth(request, call_next):
-    """Protect the public dashboard when DASHBOARD_USERNAME/PASSWORD are set.
-
-    /health stays unauthenticated so a hosting platform can perform health checks.
-    """
-    if not AUTH_ENABLED or request.url.path == "/health":
-        return await call_next(request)
-
-    auth = request.headers.get("Authorization", "")
-    valid = False
-    if auth.startswith("Basic "):
-        try:
-            raw = base64.b64decode(auth[6:], validate=True).decode("utf-8")
-            username, password = raw.split(":", 1)
-            valid = hmac.compare_digest(username, DASHBOARD_USERNAME) and hmac.compare_digest(
-                password, DASHBOARD_PASSWORD
+    """Optional Basic Auth plus conservative browser security headers."""
+    if AUTH_ENABLED and request.url.path != "/health":
+        auth = request.headers.get("Authorization", "")
+        valid = False
+        if auth.startswith("Basic "):
+            try:
+                raw = base64.b64decode(auth[6:], validate=True).decode("utf-8")
+                username, password = raw.split(":", 1)
+                valid = hmac.compare_digest(username, DASHBOARD_USERNAME) and hmac.compare_digest(
+                    password, DASHBOARD_PASSWORD
+                )
+            except (ValueError, UnicodeDecodeError):
+                valid = False
+        if not valid:
+            response = PlainTextResponse(
+                "Authentication required",
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="ENTSO-E Desk"'},
             )
-        except (ValueError, UnicodeDecodeError):
-            valid = False
+        else:
+            response = await call_next(request)
+    else:
+        response = await call_next(request)
 
-    if not valid:
-        return PlainTextResponse(
-            "Authentication required",
-            status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="ENTSO-E Desk"'},
-        )
-    return await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; worker-src 'self' blob:; object-src 'none'; "
+        "base-uri 'none'; frame-ancestors 'none'",
+    )
+    return response
 
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -1025,49 +1305,45 @@ def index():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "token_configured": bool(API_KEY), "endpoint": ENDPOINT, "time": datetime.now(BERLIN).isoformat()}
+    return {"ok": True, "version": "4.3.0", "configured": bool(API_KEY), "time": datetime.now(BERLIN).isoformat()}
 
 
 def endpoint_guard(fn):
     try:
         return fn()
     except LookupError as e:
-        return {"error": str(e), "series": {}, "updated": datetime.now(BERLIN).isoformat()}
+        raise HTTPException(status_code=404, detail=f"ENTSO-E: {e}")
     except Exception as e:
         msg = str(e).replace(API_KEY, "***") if API_KEY else str(e)
         raise HTTPException(status_code=502, detail=msg)
 
 
 @app.get("/api/renewables")
-def api_renewables(day: str | None = None, force: bool = False):
-    return endpoint_guard(lambda: fetch_renewables(day, force))
+def api_renewables(day: Date | None = None):
+    return endpoint_guard(lambda: fetch_renewables(day.isoformat() if day else None, False))
 
 
 @app.get("/api/load")
-def api_load(day: str | None = None, force: bool = False):
-    return endpoint_guard(lambda: fetch_load(day, force))
+def api_load(day: Date | None = None):
+    return endpoint_guard(lambda: fetch_load(day.isoformat() if day else None, False))
 
 
 @app.get("/api/borders")
-def api_borders(day: str | None = None, neighbors: str = Query(default=",".join(DEFAULT_NEIGHBORS)), force: bool = False):
+def api_borders(day: Date | None = None, neighbors: str = Query(default=",".join(DEFAULT_NEIGHBORS))):
     selected = [x.strip().upper() for x in neighbors.split(",") if x.strip()]
-    return endpoint_guard(lambda: fetch_borders(day, selected, force))
+    return endpoint_guard(lambda: fetch_borders(day.isoformat() if day else None, selected, False))
 
 
 @app.get("/api/outages")
-def api_outages(day: str | None = None, force: bool = False):
-    return endpoint_guard(lambda: fetch_outages(day, force))
+def api_outages(day: Date | None = None):
+    return endpoint_guard(lambda: fetch_outages(day.isoformat() if day else None, False))
 
 
 @app.get("/api/balancing")
-def api_balancing(day: str | None = None, force: bool = False):
-    return endpoint_guard(lambda: fetch_balancing(day, force))
+def api_balancing(day: Date | None = None):
+    return endpoint_guard(lambda: fetch_balancing(day.isoformat() if day else None, False))
 
 
-@app.post("/api/cache/clear")
-def clear_cache():
-    CACHE.clear()
-    return {"ok": True}
 
 
 if __name__ == "__main__":

@@ -15,9 +15,9 @@ services:
         value: "300"
       - key: ENTSOE_CACHE_SECONDS
         value: "240"
+      - key: ENTSOE_CACHE_MAX_ENTRIES
+        value: "256"
       - key: ENTSOE_HTTP_TIMEOUT
         value: "35"
-      - key: DASHBOARD_USERNAME
-        sync: false
-      - key: DASHBOARD_PASSWORD
-        sync: false
+      - key: ENTSOE_MAX_REQUESTS_PER_MINUTE
+        value: "300"

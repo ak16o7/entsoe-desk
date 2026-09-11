@@ -40,3 +40,10 @@ html{-webkit-text-size-adjust:100%;text-size-adjust:100%}body{overflow-x:hidden}
 }
 
 @media(hover:none) and (pointer:coarse){button:hover{background:#102639}.info{width:20px;height:20px}.panel-metric .info{width:18px;height:18px}}
+
+/* v4.3 data-quality states */
+.pill.warn,.badge.warn{color:#fde68a;border-color:#854d0e}
+.source-chip.partial{border-color:#854d0e;color:#fde68a}
+.source-chip.truncated{border-color:#7f1d1d;color:#fecaca}
+.coverage-note{margin:8px 0 0;min-height:16px;color:#8ea2b8}
+.badge.neutral{color:#9fb1c5}.badge.no_data{color:#8194aa;border-style:dashed}
