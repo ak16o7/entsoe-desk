@@ -27,6 +27,8 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.quality import classify_notice, outage_breakdown, panel_quality
+
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR.parent / ".env")
 
@@ -70,7 +72,7 @@ DEFAULT_NEIGHBORS = list(ALL_NEIGHBORS)
 BALANCING_AREAS = ["50HERTZ", "AMPRION", "TENNET_DE", "TRANSNETBW"]
 
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": "entsoe-desk/4.4 (+public dashboard)"})
+SESSION.headers.update({"User-Agent": "entsoe-desk/4.4.1 (+public dashboard)"})
 SESSION.mount("https://", HTTPAdapter(max_retries=Retry(
     total=2, connect=2, read=2, status=2, backoff_factor=0.35,
     status_forcelist=(429, 500, 502, 503, 504), allowed_methods=frozenset({"GET"}),
@@ -529,7 +531,7 @@ def cached(key: str, ttl: int, force: bool, fn):
 
 def fetch_renewables(day: str | None, force: bool = False) -> dict[str, Any]:
     start, end, d = day_bounds(day)
-    key = f"renewables:v4.4:{d.isoformat()}"
+    key = f"renewables:v4.4.1:{d.isoformat()}"
 
     def maybe_forecast(process_type: str) -> list[dict[str, Any]]:
         try:
@@ -648,7 +650,7 @@ def fetch_renewables(day: str | None, force: bool = False) -> dict[str, Any]:
 
 def fetch_load(day: str | None, force: bool = False) -> dict[str, Any]:
     start, end, d = day_bounds(day)
-    key = f"load:v4.4:{d.isoformat()}"
+    key = f"load:v4.4.1:{d.isoformat()}"
 
     def work():
         actual_b = entsoe_request(
@@ -733,7 +735,7 @@ def fetch_borders(day: str | None, neighbors: list[str], force: bool = False) ->
     neighbors = list(dict.fromkeys(n for n in neighbors if n in ALL_NEIGHBORS))
     if not neighbors:
         neighbors = DEFAULT_NEIGHBORS
-    key = f"borders:v4.4:{d.isoformat()}:{','.join(neighbors)}"
+    key = f"borders:v4.4.1:{d.isoformat()}:{','.join(neighbors)}"
 
     def work():
         result: dict[str, Any] = {
@@ -928,7 +930,7 @@ def _fetch_outage_pages(zone: str, document_type: str, start: datetime, end: dat
 def fetch_outages(day: str | None, force: bool = False) -> dict[str, Any]:
     start, end, d = day_bounds(day)
     zones = ["DE_LU", "FR", "NL", "BE"]
-    key = f"outages:v4.4:{d.isoformat()}"
+    key = f"outages:v4.4.1:{d.isoformat()}"
 
     def work():
         raw_by_source: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -1012,7 +1014,7 @@ def fetch_outages(day: str | None, force: bool = False) -> dict[str, Any]:
         now = datetime.now(BERLIN)
         ref = end - timedelta(minutes=15) if d < now.date() else start if d > now.date() else now
         active_rows = active_event_rows(selected_rows, ref)
-        upcoming_candidates = [r for r in selected_rows if ref < r["start"] < end and (r.get("unavailable") is None or float(r["unavailable"]) > 0)]
+        upcoming_candidates = [r for r in selected_rows if ref < (r.get("event_start") or r["start"]) < end and (r.get("unavailable") is None or float(r["unavailable"]) > 0)]
         # One row per logical event for counts and the table's first occurrence.
         reportable_by_event: dict[tuple[Any, ...], dict[str, Any]] = {}
         upcoming_by_event: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -1036,19 +1038,33 @@ def fetch_outages(day: str | None, force: bool = False) -> dict[str, Any]:
         errors = [f"{z}:{doc}:{state}" for z, docs in source_status.items() for doc, state in docs.items() if state in ("error", "truncated", "parse_error")]
         no_data = [f"{z}:{doc}" for z, docs in source_status.items() for doc, state in docs.items() if state in ("no_data", "empty")]
 
+        def notice(r):
+            return {
+                "zone":r["zone"], "plant":r["plant"], "psr":r["psr"], "source":r["document_type"],
+                "unavailable_mw":round(r["unavailable"],1) if r["unavailable"] is not None else None,
+                "nominal_mw":r.get("nominal"), "available_mw":r.get("available"),
+                "resource_id":r.get("resource_id"), "production_id":r.get("production_id"),
+                "reason_code":r.get("reason_code"), "reason_text":r.get("reason_text"),
+                "start":r["start"].isoformat(), "end":r["end"].isoformat(), "business":r["business"],
+                "event_start":(r.get("event_start") or r["start"]).isoformat(),
+                "event_end":(r.get("event_end") or r["end"]).isoformat(),
+                "active":r in active_rows,
+                "state":"active" if r in active_rows else "upcoming" if r["start"]>ref else "ended",
+                **classify_notice(r),
+            }
+        representatives = {event_key(r):r for r in reportable_rows}
+        representatives.update({event_key(r):r for r in upcoming_rows})
+        representatives.update({event_key(r):r for r in active_rows})
+        all_notices = sorted((notice(r) for r in representatives.values()),
+            key=lambda r: ({"active":0,"upcoming":1,"ended":2}[r["state"]], -(r["unavailable_mw"] or 0), r["start"], r["plant"]))
+
         return {
             "date": d.isoformat(), "updated": datetime.now(BERLIN).isoformat(),
             "series": {z: as_points(by_zone[z]) if complete else [] for z in zones},
             "total_series": as_points(total_series),
-            "top": [{
-                "zone": r["zone"], "plant": r["plant"], "psr": r["psr"], "source": r["document_type"],
-                "unavailable_mw": round(r["unavailable"], 1) if r["unavailable"] is not None else None,
-                "nominal_mw": r.get("nominal"), "available_mw": r.get("available"),
-                "resource_id": r.get("resource_id"), "production_id": r.get("production_id"),
-                "reason_code": r.get("reason_code"), "reason_text": r.get("reason_text"),
-                "start": r["start"].isoformat(), "end": r["end"].isoformat(), "business": r["business"],
-                "active": r in active_rows,
-            } for r in display_rows[:12]],
+            "top": [notice(r) for r in display_rows[:12]],
+            "notices": all_notices,
+            "breakdown": outage_breakdown(active_rows, complete),
             "kpi": {
                 "unavailable_mw": round(current_total, 1) if current_total is not None else None,
                 "as_of": ref.isoformat(),
@@ -1280,7 +1296,7 @@ def _fetch_activation_family(family, start, end):
 
 def fetch_balancing(day: str | None, force: bool = False) -> dict[str, Any]:
     start, end, d = day_bounds(day)
-    key = f"balancing:v4.4:{d.isoformat()}"
+    key = f"balancing:v4.4.1:{d.isoformat()}"
 
     def work():
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -1369,7 +1385,7 @@ def fetch_balancing(day: str | None, force: bool = False) -> dict[str, Any]:
 
 app = FastAPI(
     title="ENTSO-E Desk",
-    version="4.4.0",
+    version="4.4.1",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -1426,7 +1442,12 @@ def index():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "4.4.0", "configured": bool(API_KEY), "time": datetime.now(BERLIN).isoformat()}
+    return {"ok": True, "version": "4.4.1", "configured": bool(API_KEY), "time": datetime.now(BERLIN).isoformat()}
+
+
+def panel_response(name, fn):
+    data = fn()
+    return {**data, "quality": panel_quality(name, data)}
 
 
 def endpoint_guard(fn):
@@ -1441,28 +1462,28 @@ def endpoint_guard(fn):
 
 @app.get("/api/renewables")
 def api_renewables(day: Date | None = None):
-    return endpoint_guard(lambda: fetch_renewables(day.isoformat() if day else None, False))
+    return endpoint_guard(lambda: panel_response("renewables", lambda: fetch_renewables(day.isoformat() if day else None, False)))
 
 
 @app.get("/api/load")
 def api_load(day: Date | None = None):
-    return endpoint_guard(lambda: fetch_load(day.isoformat() if day else None, False))
+    return endpoint_guard(lambda: panel_response("load", lambda: fetch_load(day.isoformat() if day else None, False)))
 
 
 @app.get("/api/borders")
 def api_borders(day: Date | None = None, neighbors: str = Query(default=",".join(DEFAULT_NEIGHBORS))):
     selected = [x.strip().upper() for x in neighbors.split(",") if x.strip()]
-    return endpoint_guard(lambda: fetch_borders(day.isoformat() if day else None, selected, False))
+    return endpoint_guard(lambda: panel_response("borders", lambda: fetch_borders(day.isoformat() if day else None, selected, False)))
 
 
 @app.get("/api/outages")
 def api_outages(day: Date | None = None):
-    return endpoint_guard(lambda: fetch_outages(day.isoformat() if day else None, False))
+    return endpoint_guard(lambda: panel_response("outages", lambda: fetch_outages(day.isoformat() if day else None, False)))
 
 
 @app.get("/api/balancing")
 def api_balancing(day: Date | None = None):
-    return endpoint_guard(lambda: fetch_balancing(day.isoformat() if day else None, False))
+    return endpoint_guard(lambda: panel_response("balancing", lambda: fetch_balancing(day.isoformat() if day else None, False)))
 
 
 

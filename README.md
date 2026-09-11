@@ -1,8 +1,19 @@
-# ENTSO-E Desk v4.4
+# ENTSO-E Desk v4.4.1
 
 FastAPI/Python + lokal gebündeltes Plotly für das bestehende Render/GitHub-Deployment. Die fünf API-Routen und die Umgebungsvariablen bleiben kompatibel.
 
-## Änderungen
+## Neu in v4.4.1
+
+- Fehlende Aktivierungsdaten heißen ausdrücklich „activation data unavailable“. Die Abdeckung nennt die vier deutschen LFA/SCA und verfügbare Gebietsreihen.
+- Panel- und Gesamtstatus unterscheiden erfolgreiche HTTP-Antworten von verfügbaren, partiellen und fehlenden Daten. Die Einstufung ist keine Aktualitätsgarantie; Zeitstempel bleiben separat sichtbar.
+- „Reported unavailable capacity“ bezeichnet gemeldete Einschränkungen im ausgewählten A80/A77-Quellenumfang. Zwei getrennte Aufteilungen zeigen Meldungstyp und Gesamtdauer, jeweils ohne Ressourcen-Doppelzählung. Die beiden Aufteilungen dürfen nicht miteinander addiert werden.
+- Langfristig bedeutet als Desk-Konvention mindestens 30 Tage. Endjahre ab 2100 werden als offene Markierung gekennzeichnet, nicht automatisch als Stilllegung interpretiert.
+- Die vollständige Tages-Meldungstabelle lässt sich nach Typ und Dauer filtern. Die Filter ändern ausschließlich die Tabelle. Gesamtsumme, Diagramm und Aufteilung bleiben unverändert. Veröffentlichte Hinweise und vollständige Ereigniszeiten sind sichtbar.
+- A85 zeigt positive (A04) und negative (A05) Imbalance. Gleiche Preise werden nur bei identischem ISP gemeinsam dargestellt.
+
+Aktueller Prüfbericht: **AUDIT-v4.4.1.md**. Der Bericht **AUDIT-v4.4.md** dokumentiert ausschließlich die vorherige Basisversion.
+
+## Übernommene Korrekturen aus v4.4
 
 - Panel 4 liest die vollständigen R3-XML-Elementnamen für nominalP, Generationseinheit, Produktionsanlage, PSR-Typ, Standort und Zeitgrenzen. Verfügbarkeit wird als Nennleistung minus verfügbare MW berechnet. Unbekannte Kapazitäten bleiben unbekannt, Ereignisse werden trotzdem gezählt. Stornierungen ohne Punkte, A01/A03, Revisionen und Pagination sind abgedeckt. Überlappende Meldungen desselben Ressourcen-EIC tragen maximal die größte gleichzeitig gemeldete Einschränkung bei.
 - Panel 5 fragt A24/12.3.E je deutscher LFA/SCA ab: 50Hertz, Amprion, TenneT DE, TransnetBW. Primär A67/A68 (aFRR Central/Local) und A60/A61 (mFRR Scheduled/Direct). A51/A47 füllen ausschließlich fehlende aktivierte Werte desselben Gebiets, Produkts, derselben Richtung und Viertelstunde. Eine veröffentlichte Null hat Vorrang vor dem Fallback. Angebotene, aktivierte und nicht verfügbare Mengen bleiben getrennt.
@@ -45,6 +56,4 @@ Der Live-Abgleich ist eine Regression für einen vollständig veröffentlichten 
 - `createdDateTime` kann die Erstellung des API-Dokuments angeben und ist kein gesicherter ursprünglicher Prognose-Publikationszeitpunkt.
 - Kalendarische Auflösungen P1M/P1Y werden ausdrücklich abgelehnt statt als 15 Minuten fehlinterpretiert. Für die geprüften Tagesabfragen kamen feste Auflösungen zurück.
 
-Details, Quellen, Live-Ergebnisse und nicht ausgeführte Prüfungen: **AUDIT-v4.4.md**. Upgrade: **DEPLOY-RENDER.md**.
-
-Live Website: https://entsoe-desk.onrender.com/
+Details, Quellen, Live-Ergebnisse und nicht ausgeführte Prüfungen: **AUDIT-v4.4.1.md**. Upgrade: **DEPLOY-RENDER.md**.

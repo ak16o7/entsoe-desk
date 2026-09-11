@@ -1,6 +1,6 @@
-# Upgrade des bestehenden Render-Dienstes auf v4.4
+# Upgrade des bestehenden Render-Dienstes auf v4.4.1
 
-1. ZIP entpacken. Den **Inhalt** von `entsoe-desk-v4.4-web` in das bestehende Repository übernehmen, sodass `Dockerfile`, `render.yaml` und `app/` weiterhin direkt im bisherigen Repository-/Render-Root liegen. Keine zusätzliche verschachtelte Projektebene anlegen.
+1. ZIP entpacken. Den **Inhalt** von `entsoe-desk-v4.4.1-web` in das bestehende Repository übernehmen, sodass `Dockerfile`, `render.yaml` und `app/` weiterhin direkt im bisherigen Repository-/Render-Root liegen. Keine zusätzliche verschachtelte Projektebene anlegen.
 2. Bestehende Render-Variablen, insbesondere `ENTSOE_API_KEY`, erhalten. Das Paket enthält keine `.env`. Optional eingerichtete Basic Auth unverändert beibehalten.
 3. Lokal prüfen:
 
@@ -12,7 +12,7 @@ git status
 ```
 
 4. Die geprüften Änderungen auf den bereits von Render verwendeten Branch committen und pushen. Bei aktivem Auto-Deploy baut Render den vorhandenen Service neu; kein neues Blueprint und keine neue URL nötig.
-5. Nach erfolgreichem Build `/health` aufrufen: `version` muss `4.4.0` und `configured` muss `true` sein. Browser vollständig neu laden.
+5. Nach erfolgreichem Build `/health` aufrufen: `version` muss `4.4.1` und `configured` muss `true` sein. Browser vollständig neu laden.
 6. HTTP-Smoke-Test:
 
 ```bash
@@ -27,7 +27,7 @@ Docker startet einen Uvicorn-Prozess auf `${PORT:-8000}`. Der bestehende Cache, 
 
 ## Rollback
 
-Den vorherigen v4.3-Commit im bestehenden Render-Service erneut deployen. Keine Datenbankmigration und keine neuen Secrets erforderlich.
+Den vorherigen v4.4-Commit im bestehenden Render-Service erneut deployen. Keine Datenbankmigration und keine neuen Secrets erforderlich.
 
 ## Prüfstand
 

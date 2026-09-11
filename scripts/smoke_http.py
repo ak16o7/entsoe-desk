@@ -4,6 +4,6 @@ p=argparse.ArgumentParser();p.add_argument('--base-url',default='http://127.0.0.
 for route in ['health','api/renewables','api/load','api/borders','api/outages','api/balancing']:
     url=a.base_url.rstrip('/')+'/'+route+('' if route=='health' else '?'+urllib.parse.urlencode({'day':a.day}))
     with urllib.request.urlopen(url,timeout=180) as response:data=json.load(response)
-    if route=='health':assert data['version']=='4.4.0' and data['configured'],data
+    if route=='health':assert data['version']=='4.4.1' and data['configured'],data
     else:assert 'series' in data and 'kpi' in data,(route,data)
     print(route,'OK',json.dumps(data.get('sources',{}),ensure_ascii=True))

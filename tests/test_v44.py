@@ -238,8 +238,8 @@ class ParserRegressionTests(unittest.TestCase):
 class HttpSmokeTests(unittest.TestCase):
     def setUp(self):m.CACHE.clear();self.client=TestClient(m.app)
     def test_health_html_and_static_assets(self):
-        self.assertEqual(self.client.get('/health').json()['version'],'4.4.0')
-        self.assertIn('Desk v4.4',self.client.get('/').text)
+        self.assertEqual(self.client.get('/health').json()['version'],'4.4.1')
+        self.assertIn('Desk v4.4.1',self.client.get('/').text)
         for asset in ('style.css','plotly.min.js'):
             self.assertEqual(self.client.get('/static/'+asset).status_code,200)
     def test_all_five_api_routes_serialize(self):

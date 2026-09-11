@@ -1,13 +1,11 @@
 {
-  "tests": 50,
-  "passed": 50,
-  "failed": 0,
-  "live_xml_series": 45,
-  "live_xml_points": 4320,
-  "python": "3.13.14",
-  "pip_check": "passed",
-  "http_smoke": "all five routes and health passed",
-  "browser": "desktop and mobile, 10 plots, no JS errors",
-  "docker_build": "not run - unavailable",
-  "render_deployment": "not performed"
+  "version": "4.4.1",
+  "date": "2026-09-11",
+  "unit_parser_http_tests": 68,
+  "new_tests": 18,
+  "independent_xml_comparisons": 45,
+  "compared_points": 4320,
+  "http_smoke": "health + five panels passed",
+  "browser": "desktop and 390px mobile; filters passed; no console errors",
+  "docker_render_build": "not executed"
 }

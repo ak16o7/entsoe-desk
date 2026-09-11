@@ -59,7 +59,7 @@
     </div>
 
     <div class="kpi">
-      <div class="kpi-label"><span>Unavailable capacity</span><span class="info" tabindex="0">i<span class="tooltip"><b>Reportable generation unavailability</b><br>The desk uses <b>A80 generation-unit</b> outages as the primary source. <b>A77 production-unit</b> data is used only as a fallback for a zone when A80 explicitly has no data. The two hierarchy levels are never added together.<br><br>The headline is suppressed when pagination/source coverage is incomplete. A numeric zero therefore means complete queried coverage with no active reportable unavailable MW in the selected scope — not that every physical unit is necessarily fully available.</span></span></div>
+      <div class="kpi-label"><span>Reported unavailable capacity</span><span class="info" tabindex="0">i<span class="tooltip"><b>Reported capacity restrictions</b><br>Active notices can include planned, forced, long-term, construction and shutdown-related restrictions. This is not a count of newly failed plants or a measure of acute system stress.<br>The desk uses <b>A80 generation-unit</b> outages as the primary source. <b>A77 production-unit</b> data is used only as a fallback for a zone when A80 explicitly has no data. The two hierarchy levels are never added together.<br><br>The headline is suppressed when pagination/source coverage is incomplete. A numeric zero therefore means complete queried coverage with no active reportable unavailable MW in the selected scope — not that every physical unit is necessarily fully available.</span></span></div>
       <strong id="kpiOutage">—</strong><small id="kpiOutageBasis">A80 primary · A77 fallback</small><div class="kpi-deltas" id="kpiOutageDeltas"></div><small class="kpi-time" id="kpiOutageTime">Reference time: —</small>
     </div>
 
@@ -102,16 +102,23 @@
     </article>
 
     <article class="card event-card" id="outageCard">
-      <div class="cardhead"><div><h2>4 · Generation outages</h2><p>A80 generation units primary · A77 production units fallback · paginated + revision-aware · DE-LU + FR + NL + BE</p></div><div class="badge" id="statusOutages">idle</div></div>
+      <div class="cardhead"><div><h2>4 · Reported generation unavailability</h2><p>A80 generation units primary · A77 production units fallback · paginated + revision-aware · DE-LU + FR + NL + BE</p></div><div class="badge" id="statusOutages">idle</div></div>
       <div class="panel-metrics" id="outageSummary"></div>
       <div class="source-health" id="outageSources"></div>
+      <div id="outageBreakdown" class="outage-breakdown"></div>
+      <p class="method-note">Two separate views of the same active total; do not add them together. Long-term: event duration ≥30 days. End year ≥2100: open-ended marker, not proof of retirement. Overlapping notices with different labels: mixed/unknown.</p>
+      <div class="outage-filters">
+        <label>Notice type <select id="outageType"><option value="all">All selected-source notices</option><option value="planned">Planned (A53)</option><option value="forced">Unplanned / forced (A54)</option><option value="unknown">Unknown type</option></select></label>
+        <label>Event duration <select id="outageDuration"><option value="all">All durations</option><option value="bounded">Less than 30 days</option><option value="long_term">Long-term · ≥30 days</option><option value="open_ended">Open-ended marker · ≥2100</option><option value="unknown">Unknown duration</option></select></label>
+      </div>
+      <p id="outageFilterSummary" class="method-note">Table filters only. Headline, chart and breakdown keep the full selected-source scope.</p>
       <div class="empty-state hidden" id="outageEmpty">
         <div class="empty-state-kicker">A77 / A80</div>
         <strong id="outageEmptyTitle">No reportable outage event returned</strong>
         <p id="outageEmptyText">No reportable outage event was found for the selected delivery day and scope. This is intentionally not rendered as a zero-line chart.</p>
       </div>
       <div id="outages" class="chart outage-chart"></div>
-      <div class="tablewrap" id="outageTableWrap"><table><thead><tr><th>Status</th><th>Zone</th><th>Unit</th><th>Unavailable</th><th>Window</th></tr></thead><tbody id="outageTable"></tbody></table></div>
+      <div class="tablewrap" id="outageTableWrap"><table><thead><tr><th>Status</th><th>Zone</th><th>Unit / classification</th><th>Reported unavailable</th><th>Published event window / shown segment</th></tr></thead><tbody id="outageTable"></tbody></table></div>
     </article>
 
     <article class="card stress-card">
@@ -127,20 +134,20 @@
         <div class="subpanel-head"><span>A86 · Imbalance volume <span class="info" tabindex="0">i<span class="tooltip"><b>What is A86?</b><br>ENTSO-E Total Imbalance Volume is the aggregated system imbalance for each imbalance settlement period (ISP / MTU). It is an <b>energy volume in MWh</b>, not an instantaneous MW level.<br><br>In the source data, surplus/excess and deficit are distinguished. This dashboard keeps the sign returned/derived from the ENTSO-E series: positive indicates surplus/excess and negative indicates deficit when the source uses that convention.<br><br>This is the system imbalance that remained to be settled; it is <b>not</b> the same thing as the amount of balancing energy activated.</span></span></span><small id="stressVolumeTime">Latest MTU: —</small></div>
         <div id="stressVolume" class="chart stress-chart"></div>
       </div>
+      <div class="mini-empty hidden" id="stressActivationEmpty">Complete activation data unavailable for the four German LFA/SCA. Missing data does not mean zero activation.</div>
       <div class="stress-subpanel hidden" id="stressActivationSection">
         <div class="subpanel-head"><span>GL EB 12.3.E · Activated balancing energy <span class="info" tabindex="0">i<span class="tooltip"><b>Current balancing activation source</b><br>The legacy 17.1.E/A83 publication was discontinued. The desk uses <b>A24 Aggregated Balancing Energy Bids</b>: four German LFA/SCA with <b>A67/A68 for aFRR</b> and <b>A60/A61 for mFRR</b>; A51/A47 only fill missing activated values. Activated quantity is taken from the published secondary quantity; Up is positive and Down negative.<br><br>aFRR and mFRR are plotted separately. A combined net line is only produced when both reserve types and all four areas have data at the same MTU.</span></span></span><small id="stressActivationTime">Latest MTU: —</small></div>
         <div id="stressActivation" class="chart stress-chart"></div>
       </div>
-      <div class="mini-empty hidden" id="stressActivationEmpty">GL EB 12.3.E activated aFRR/mFRR was not returned completely for the selected DE-LU scope.</div>
       <div class="stress-subpanel" id="stressPriceSection">
-        <div class="subpanel-head"><span>A85 · Imbalance price <span class="info" tabindex="0">i<span class="tooltip"><b>What is A85?</b><br>ENTSO-E imbalance price per imbalance settlement period. Depending on the market design, positive/negative imbalance prices may be identical (single pricing) or differ (dual pricing). The dashboard shows Long and Short separately when both are published.</span></span></span><small id="stressPriceTime">Latest MTU: —</small></div>
+        <div class="subpanel-head"><span>A85 · Imbalance price <span class="info" tabindex="0">i<span class="tooltip"><b>What is A85?</b><br>ENTSO-E imbalance price per imbalance settlement period. Depending on the market design, positive/negative imbalance prices may be identical (single pricing) or differ (dual pricing). Positive imbalance (A04, excess balance) and negative imbalance (A05, insufficient balance) are shown separately when published.</span></span></span><small id="stressPriceTime">Latest MTU: —</small></div>
         <div id="stressPrice" class="chart stress-price-chart"></div>
       </div>
       <div class="mini-empty hidden" id="stressPriceEmpty">A85 imbalance price not returned for the selected German scope.</div>
     </article>
   </main>
 
-  <footer>Source: ENTSO-E Transparency Platform Web API · Desk v4.4. Data-quality guards include R3/A03 block expansion, complete-border totals, outage pagination/revision handling and unit-stable balancing KPIs. This remains a desk monitor, not a settlement-grade system; ENTSO-E data may be revised, delayed or unavailable per series.</footer>
+  <footer>Source: ENTSO-E Transparency Platform Web API · Desk v4.4.1. Data-quality guards include R3/A03 block expansion, complete-border totals, outage pagination/revision handling and unit-stable balancing KPIs. This remains a desk monitor, not a settlement-grade system; ENTSO-E data may be revised, delayed or unavailable per series.</footer>
 
 <script>
 const REFRESH_SECONDS = Number('__REFRESH_SECONDS__');
@@ -253,16 +260,18 @@ function drawBorders(){
     setFreshness('flows',d.freshness?.physical_through);
   }
 }
+let outageData=null;
 function drawOutages(d){
+  outageData=d;
   const complete=Boolean(d.kpi?.coverage_complete);
   setKpi('kpiOutage',complete?d.kpi?.unavailable_mw:null); setDeltas('kpiOutageDeltas',complete?d.kpi?.changes:null); setTime('kpiOutageTime',d.kpi?.as_of,'Reference time');
   document.getElementById('kpiOutageBasis').textContent=complete?(d.kpi?.scope||'A80 primary · A77 fallback'):'Coverage incomplete · numeric total suppressed'; setFreshness('outages',d.kpi?.as_of);
   const active=complete?(d.kpi?.active_events??0):null, nextAt=d.kpi?.next_event_at, nextUnit=d.kpi?.next_event_unit;
   document.getElementById('outageSummary').innerHTML=[
-    metric('Active now',complete?fmtUnsigned(d.kpi?.unavailable_mw):'—',complete?`${active} event${active===1?'':'s'}`:'coverage incomplete'),
+    metric('Active notices',complete?fmtUnsigned(d.kpi?.unavailable_mw):'—',complete?`${active} notice${active===1?'':'s'} active at reference time`:'coverage incomplete'),
     metric('Largest active',complete?fmtUnsigned(d.kpi?.largest_active_mw):'—',complete?(d.kpi?.largest_active_unit||'—'):'suppressed'),
     metric('Next start',nextAt?fmtTime(nextAt):'—',nextUnit||'No upcoming event'),
-    metric('Events in day',String(d.kpi?.reportable_events??0),'unique selected-source events')
+    metric('Notices in day',String(d.kpi?.reportable_events??0),'Includes notices that started before today')
   ].join('');
   const status=d.source_status||{}, selected=d.selected_source||{}, pages=d.page_counts||{};
   document.getElementById('outageSources').innerHTML=Object.entries(status).map(([z,docs])=>{
@@ -270,6 +279,9 @@ function drawOutages(d){
     const page=` · pages A80 ${pages[z]?.A80??0}/A77 ${pages[z]?.A77??0}`;
     return `<span class="source-chip ${cls}"><b>${z}</b> A80 ${docs.A80||'—'} · A77 ${docs.A77||'—'} · use ${escapeHtml(selected[z]||'none')}${page}</span>`;
   }).join('');
+  const names={planned:'Planned (A53)',forced:'Unplanned / forced (A54)',mixed_unknown:'Mixed / unknown',bounded:'Less than 30 days',long_term:'Long-term · ≥30 days',open_ended:'Open-ended marker'};
+  document.getElementById('outageBreakdown').innerHTML=[['notice_type','By notice type'],['duration_class','By event duration']].map(([axis,title])=>`<section><h3>${title}</h3>${Object.entries(d.breakdown?.[axis]||{}).map(([key,b])=>`<div><span>${names[key]||key}</span><b>${fmtUnsigned(b.mw)}</b></div>`).join('')}</section>`).join('');
+  drawOutageTable();
   const hasEvents=(d.kpi?.reportable_events||0)>0;
   show('outageEmpty',!hasEvents||!complete); show('outages',hasEvents&&complete); show('outageTableWrap',hasEvents);
   if(!complete){
@@ -283,10 +295,18 @@ function drawOutages(d){
     const tr=Object.entries(d.series||{}).filter(([,v])=>hasPoints(v)).map(([k,v])=>trace(k,v,{stackgroup:'one'}));
     renderPlot('outages',tr,{...layoutBase,margin:{l:55,r:18,t:8,b:50},yaxis:{...layoutBase.yaxis,title:'Unavailable MW'},legend:{orientation:'h',y:-0.2,x:0}},config);
   }
-  if(hasEvents){
-    document.getElementById('outageTable').innerHTML=(d.top||[]).map(r=>`<tr><td><span class="row-status ${r.active?'active':'upcoming'}">${r.active?'active':'upcoming'}</span></td><td>${escapeHtml(r.zone)}</td><td>${escapeHtml(r.plant)}</td><td>${r.unavailable_mw==null?'unknown':Math.round(r.unavailable_mw).toLocaleString('de-DE')+' MW'}</td><td>${new Date(r.start).toLocaleString('de-DE',{timeZone:'Europe/Berlin'})}–${new Date(r.end).toLocaleString('de-DE',{timeZone:'Europe/Berlin'})}</td></tr>`).join('') || '<tr><td colspan="5">No active or upcoming event in the remaining delivery day.</td></tr>';
-  }
 }
+function drawOutageTable(){
+  if(!outageData)return;
+  const type=document.getElementById('outageType').value,duration=document.getElementById('outageDuration').value;
+  const all=outageData.notices||outageData.top||[];
+  const rows=all.filter(r=>(type==='all'||r.notice_type===type)&&(duration==='all'||r.duration_class===duration));
+  const labels={planned:'Planned · A53',forced:'Unplanned / forced · A54',unknown:'Unknown',bounded:'<30 days',long_term:'Long-term · ≥30 days',open_ended:'Open-ended marker · ≥2100'};
+  const when=t=>new Date(t).toLocaleString('de-DE',{timeZone:'Europe/Berlin'});
+  document.getElementById('outageFilterSummary').textContent=`${rows.length}/${all.length} notices in table · table filters only; total, chart and breakdown unchanged. Notice MW are not additive when units overlap.`;
+  document.getElementById('outageTable').innerHTML=rows.map(r=>`<tr><td>${escapeHtml(r.state|| (r.active?'active':'upcoming'))}</td><td>${escapeHtml(r.zone)}</td><td><b>${escapeHtml(r.plant)}</b><small>${escapeHtml(labels[r.notice_type]||'Unknown type')}</small><small class="duration-${escapeHtml(r.duration_class)}">${escapeHtml(labels[r.duration_class]||'Unknown duration')}</small>${r.reason_text?`<details><summary>Published note</summary><div class="notice-reason">${escapeHtml(r.reason_text)}</div></details>`:''}</td><td>${r.unavailable_mw==null?'unknown':Math.round(r.unavailable_mw).toLocaleString('de-DE')+' MW'}</td><td>${when(r.event_start||r.start)} – ${when(r.event_end||r.end)}<small>Capacity segment: ${when(r.start)} – ${when(r.end)}</small></td></tr>`).join('')||'<tr><td colspan="5">No notices match these table filters.</td></tr>';
+}
+
 function drawBalancing(d){
   const s=d.series||{}; const src=d.sources||{}; const fresh=d.freshness||{};
   document.getElementById('stressSources').innerHTML=['12.3.E','A85','A86'].map(code=>sourceChip(code,src[code])).join('');
@@ -300,15 +320,18 @@ function drawBalancing(d){
   document.getElementById('kpiStressBasis').textContent=d.kpi?.imbalance_volume_mwh===null||d.kpi?.imbalance_volume_mwh===undefined?'A86 unavailable':`A86 · ${stateLabel}`;
   setFreshness('stress',fresh.volume_through);
 
-  const priceLabel=d.kpi?.imbalance_price_eur_mwh!==null&&d.kpi?.imbalance_price_eur_mwh!==undefined?fmtPrice(d.kpi?.imbalance_price_eur_mwh):`Long ${fmtPrice(d.kpi?.imbalance_price_long_eur_mwh)} · Short ${fmtPrice(d.kpi?.imbalance_price_short_eur_mwh)}`;
+  const positive=(s['Imbalance price long']||[]).filter(p=>Date.parse(p.t)<=Date.now()).at(-1);
+  const negative=(s['Imbalance price short']||[]).filter(p=>Date.parse(p.t)<=Date.now()).at(-1);
+  const equalPrice=positive&&negative&&Date.parse(positive.t)===Date.parse(negative.t)&&positive.v===negative.v;
+  const priceLabel=equalPrice?fmtPrice(positive.v):d.kpi?.imbalance_price_eur_mwh!==null&&d.kpi?.imbalance_price_eur_mwh!==undefined?fmtPrice(d.kpi?.imbalance_price_eur_mwh):`Positive ${fmtPrice(d.kpi?.imbalance_price_long_eur_mwh)} · Negative ${fmtPrice(d.kpi?.imbalance_price_short_eur_mwh)}`;
   const a86Tip='<b>A86 · Total Imbalance Volume</b><br>Energy volume per imbalance settlement period in <b>MWh</b>. The desk keeps this separate from activated balancing quantities: there is no MW fallback into the headline KPI.';
   const activationTip='<b>GL EB 12.3.E · A24</b><br>Activated quantities from Aggregated Balancing Energy Bids. A67/A68 = aFRR Central/Local; A60/A61 = mFRR Scheduled/Direct. A51/A47 are fallback only, selected per area, product, direction and MTU. Up is positive and Down negative. The total net line requires both reserve types on the same MTU; otherwise the available component is still shown as partial.';
-  const a85Tip='<b>A85 · Imbalance price</b><br>Settlement price for imbalance in the corresponding ISP / MTU, in €/MWh. Long and Short can be equal under single pricing.';
+  const a85Tip='<b>A85 · Imbalance price</b><br>Settlement price for imbalance in the corresponding ISP / MTU, in €/MWh. A04 is excess/positive imbalance; A05 is insufficient/negative imbalance. Equal prices are identified only at matching timestamps.';
   const actValue=d.kpi?.net_activation_mw!==null&&d.kpi?.net_activation_mw!==undefined?fmt(d.kpi?.net_activation_mw):`aFRR ${fmt(d.kpi?.afrr_net_mw)} · mFRR ${fmt(d.kpi?.mfrr_net_mw)}`;
   document.getElementById('stressSummary').innerHTML=[
     metricInfo('A86 imbalance volume',fmtUnit(d.kpi?.imbalance_volume_mwh,'MWh'),`Latest MTU ${fmtTime(fresh.volume_through)} · ${stateLabel}`,a86Tip),
     metricInfo('12.3.E net activation',actValue,src['12.3.E']?.state==='partial'?'Incomplete Germany coverage · area curves below':`Latest MTU ${fmtTime(fresh.activation_through)}`,activationTip),
-    metricInfo('A85 imbalance price',priceLabel,`Latest MTU ${fmtTime(fresh.price_through)}`,a85Tip)
+    metricInfo('A85 imbalance price',priceLabel,equalPrice?`Positive = negative · ISP ${fmtTime(positive.t)}`:`Latest MTU ${fmtTime(fresh.price_through)}`,a85Tip)
   ].join('');
 
   const areaTraces=[];
@@ -317,12 +340,15 @@ function drawBalancing(d){
       if(hasPoints(values.net)) areaTraces.push(trace(`${family} · ${area}`,values.net,{line:{width:1.5,dash:family==='mFRR'?'dot':'solid'}}));
     }
   }
-  document.getElementById('stressSources').innerHTML += Object.entries(d.activation_areas||{}).flatMap(([family,areas])=>Object.entries(areas).map(([area,v])=>`<span class="source-chip ${escapeHtml(v.state)}"><b>${escapeHtml(family)} ${escapeHtml(area)}</b> ${escapeHtml(v.state)} · ${escapeHtml(v.selected_processes.join('/'))||'no activation'}</span>`)).join('');
+  document.getElementById('stressSources').innerHTML += Object.entries(d.activation_areas||{}).flatMap(([family,areas])=>Object.entries(areas).map(([area,v])=>`<span class="source-chip ${escapeHtml(v.state)}"><b>${escapeHtml(family)} ${escapeHtml(area)}</b> ${escapeHtml(v.state)} · ${escapeHtml(v.selected_processes.join('/'))||'activation data unavailable'}</span>`)).join('');
   const hasVolume=hasPoints(s['Net imbalance volume']);
   const hasAfrr=hasPoints(s['aFRR net']), hasMfrr=hasPoints(s['mFRR net']), hasActivationTotal=hasPoints(s['Net activation']), hasActivation=hasAfrr||hasMfrr||hasActivationTotal||areaTraces.length>0;
   const hasSingle=hasPoints(s['Imbalance price']),hasLong=hasPoints(s['Imbalance price long']),hasShort=hasPoints(s['Imbalance price short']); const hasPrice=hasSingle||hasLong||hasShort;
   show('stressEmpty',!hasVolume&&!hasActivation&&!hasPrice);
   show('stressVolumeSection',hasVolume); show('stressActivationSection',hasActivation); show('stressActivationEmpty',!hasActivation&&(hasVolume||hasPrice));
+  const coverageText=Object.entries(d.activation_areas||{}).map(([family,areas])=>`${family}: ${Object.values(areas).filter(a=>hasPoints(a.net)).length}/4 German LFA/SCA with usable activation data`).join(' · ');
+  document.getElementById('stressActivationEmpty').textContent=(coverageText||'Activation data unavailable for the four German LFA/SCA')+'. '+(hasActivation?'Available area curves are shown below. ':'')+'Missing data does not mean zero activation.';
+  show('stressActivationEmpty',src['12.3.E']?.state!=='ok');
   show('stressPriceSection',hasPrice); show('stressPriceEmpty',!hasPrice&&(hasVolume||hasActivation));
   document.getElementById('stressVolumeTime').textContent=`Latest MTU: ${fmtTime(fresh.volume_through)}`;
   document.getElementById('stressActivationTime').textContent=`DE total: ${src['12.3.E']?.state||'unknown'} · available areas shown separately`;
@@ -337,14 +363,14 @@ function drawBalancing(d){
     renderPlot('stressActivation',tr,{...layoutBase,margin:{l:55,r:15,t:8,b:46},yaxis:{...layoutBase.yaxis,title:'MW',zeroline:true,zerolinewidth:2},legend:{orientation:'h',y:-0.22,x:0},hovermode:'x unified'},config);
   }
   if(hasPrice){
-    const tr=[]; if(hasSingle)tr.push(trace('Imbalance price',s['Imbalance price'],{line:{width:2.7}})); if(hasLong)tr.push(trace('Long price',s['Imbalance price long'],{line:{width:2.2}})); if(hasShort)tr.push(trace('Short price',s['Imbalance price short'],{line:{dash:'dot',width:2.2}}));
+    const tr=[]; if(hasSingle)tr.push(trace('Imbalance price',s['Imbalance price'],{line:{width:2.7}})); if(hasLong)tr.push(trace('Positive imbalance (A04)',s['Imbalance price long'],{line:{width:2.2}})); if(hasShort)tr.push(trace('Negative imbalance (A05)',s['Imbalance price short'],{line:{dash:'dot',width:2.2}}));
     renderPlot('stressPrice',tr,{...layoutBase,margin:{l:62,r:15,t:8,b:46},yaxis:{...layoutBase.yaxis,title:'€/MWh',zeroline:true,zerolinewidth:1},legend:{orientation:'h',y:-0.22,x:0},hovermode:'x unified'},config);
   }
 }
 
 async function loadPanel(name,url,draw,statusId,errorTargets=null){
   setStatus(statusId,'loading','neutral');
-  try{ const d=await getJson(url); draw(d); setStatus(statusId,'live','ok'); return d; }
+  try{ const d=await getJson(url); draw(d); const q=d.quality?.state||'partial'; setStatus(statusId,q==='complete'?'data available':q,q==='complete'?'ok':q==='partial'?'warn':'no_data'); return d; }
   catch(e){ setStatus(statusId,e.status===404?'no data':'error',e.status===404?'no_data':'bad'); console.error(name,e); const targets=errorTargets||[name]; targets.forEach(target=>{ if(document.getElementById(target)){ show(target,true); renderPlot(target,[],{...layoutBase,annotations:[{text:escapeHtml(e.message),showarrow:false,font:{color:'#fca5a5'}}]},config); } }); return null; }
 }
 async function refresh(){
@@ -357,7 +383,7 @@ async function refresh(){
   const p5=loadPanel('balancing',apiUrl('/api/balancing'),drawBalancing,'statusBalancing',['stressVolume','stressActivation','stressPrice']);
   const results=await Promise.all([p1,p2,p3,p4,p5]);
   const live=results.filter(Boolean).length; const e=document.getElementById('apiStatus');
-  e.textContent=`Backend online · feeds ${live}/5`; e.className='pill '+(live===5?'ok':live>0?'warn':'bad');
+  const partial=results.filter(d=>d&&(d.quality?.state||'partial')==='partial').length; const unavailable=results.filter(d=>d?.quality?.state==='unavailable').length; e.textContent=`Backend online · panels ${live}/5 responded${partial?' · '+partial+' partial':''}${unavailable?' · '+unavailable+' unavailable':''}`; e.className='pill '+(live===5&&!partial&&!unavailable?'ok':live>0?'warn':'bad');
   document.getElementById('lastUpdate').textContent='Dashboard refreshed '+new Date().toLocaleTimeString('de-DE'); document.getElementById('refresh').disabled=false;
 }
 function rebuildBorderSelect(d){ const sel=document.getElementById('borderView'); const old=sel.value; sel.innerHTML='<option value="TOTAL">Total</option>'+Object.keys(d.borders||{}).map(x=>`<option value="${x}">${x}</option>`).join(''); if([...sel.options].some(o=>o.value===old))sel.value=old; }
@@ -371,7 +397,8 @@ window.addEventListener('resize',()=>{
 });
 window.addEventListener('DOMContentLoaded',()=>{
   const now=new Date(); document.getElementById('day').value=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Berlin'}).format(now); document.getElementById('intervalLabel').textContent=`${Math.round(REFRESH_SECONDS/60)} min`;
-  initNeighbors(); health(); refresh(); resetTimer();
+  ['outageType','outageDuration'].forEach(id=>document.getElementById(id).addEventListener('change',drawOutageTable));
+  initNeighbors(); health().then(refresh); resetTimer();
   document.getElementById('refresh').addEventListener('click',()=>refresh()); document.getElementById('day').addEventListener('change',()=>{state.freshness={};updateFreshness();refresh();}); document.getElementById('auto').addEventListener('change',resetTimer); document.getElementById('borderView').addEventListener('change',drawBorders);
 });
 </script>
