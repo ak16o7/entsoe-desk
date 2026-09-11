@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#071019" />
+  <meta name="robots" content="noindex,nofollow" />
+  <title>ENTSO-E Desk</title>
+  <script src="/static/plotly.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">DE / CENTRAL EUROPE POWER DESK</div>
+      <h1>ENTSO-E Live Overview</h1>
+    </div>
+    <div class="controls">
+      <label>Delivery date <input type="date" id="day" /></label>
+      <label class="toggle"><input type="checkbox" id="auto" checked /> Auto refresh</label>
+      <button id="refresh">Refresh now</button>
+    </div>
+  </header>
+
+  <section class="statusbar">
+    <span id="apiStatus" class="pill">API checking…</span>
+    <span id="lastUpdate">No refresh yet</span>
+    <span>Polling every <b id="intervalLabel"></b></span>
+  </section>
+
+  <section class="freshnessbar" aria-label="Data freshness">
+    <span class="freshness-title">DATA FRESHNESS</span>
+    <span class="freshness-pill" id="freshRes">RES actual through —</span>
+    <span class="freshness-pill" id="freshLoad">Load through —</span>
+    <span class="freshness-pill" id="freshFlows">Flows through —</span>
+    <span class="freshness-pill" id="freshOutages">Outages ref —</span>
+    <span class="freshness-pill" id="freshStress">System stress through —</span>
+  </section>
+
+  <section class="kpis">
+    <div class="kpi">
+      <div class="kpi-label"><span>RES forecast error</span><span class="info" tabindex="0">i<span class="tooltip"><b>Renewables forecast error</b><br>Actual Solar + Onshore + Offshore minus the freshest complete ENTSO-E forecast for the same MTU. Forecast priority: Current A18 → Intraday A40 → Day-ahead A01.<br><br><b>Positive</b> = more renewable supply than forecast. <b>Negative</b> = renewable shortfall. Δ15/30/60 shows how this error changed versus the corresponding earlier MTU.</span></span></div>
+      <strong id="kpiRes">—</strong><small id="kpiResBasis">Actual − current forecast</small><div class="kpi-deltas" id="kpiResDeltas"></div><small class="kpi-time" id="kpiResTime">Latest common MTU: —</small>
+    </div>
+
+    <div class="kpi kpi-revision">
+      <div class="kpi-label"><span>Next 4h RES revision</span><span class="info" tabindex="0">i<span class="tooltip"><b>Forward renewable revision</b><br>Average over the next four delivery hours of <b>Current A18 RES forecast − Day-ahead A01 RES forecast</b>.<br><br><b>Positive</b> = the latest forecast added renewable supply versus day-ahead. <b>Negative</b> = the latest forecast removed renewable supply. Unlike the other KPIs, this is a forward window rather than a single MTU.</span></span></div>
+      <strong id="kpiRevision">—</strong><small>Current forecast − DA forecast</small><div class="kpi-deltas kpi-range" id="kpiRevisionRange"></div><small class="kpi-time" id="kpiRevisionTime">Forward window: —</small>
+    </div>
+
+    <div class="kpi">
+      <div class="kpi-label"><span>Residual load</span><span class="info" tabindex="0">i<span class="tooltip"><b>Actual residual load</b><br>Actual system load − actual Solar − actual Wind Onshore − actual Wind Offshore.<br><br>It is the load that must be covered by conventional generation, hydro/storage and net imports. Panel 2 compares it against a consistent day-ahead residual forecast: DA load − DA RES. Δ15/30/60 shows the movement in actual residual load.</span></span></div>
+      <strong id="kpiResidual">—</strong><small id="kpiResidualBasis">Actual load − actual RES</small><div class="kpi-deltas" id="kpiResidualDeltas"></div><small class="kpi-time" id="kpiResidualTime">Latest common MTU: —</small>
+    </div>
+
+    <div class="kpi">
+      <div class="kpi-label"><span>Net physical import</span><span class="info" tabindex="0">i<span class="tooltip"><b>Net physical cross-border flow</b><br>For each selected border: physical flow into DE-LU − physical flow out of DE-LU. The Total view sums the selected borders.<br><br><b>Positive</b> = net importing. <b>Negative</b> = net exporting. Δ15/30/60 shows the change in the physical net position, while the subline compares physical flow with the day-ahead schedule.</span></span></div>
+      <strong id="kpiImport">—</strong><small id="kpiImportBasis">Positive = DE importing</small><div class="kpi-deltas" id="kpiImportDeltas"></div><small class="kpi-time" id="kpiImportTime">Latest MTU: —</small>
+    </div>
+
+    <div class="kpi">
+      <div class="kpi-label"><span>Unavailable capacity</span><span class="info" tabindex="0">i<span class="tooltip"><b>Reportable generation unavailability</b><br>Active ENTSO-E A77 production-unit + A80 generation-unit unavailable capacity for DE-LU, France, Netherlands and Belgium.<br><br>ENTSO-E reporting is threshold-based. Zero therefore means <b>no reportable event returned for the scope</b>, not proof that every unit is fully available. Δ15/30/60 shows changes in reportable unavailable MW.</span></span></div>
+      <strong id="kpiOutage">—</strong><small id="kpiOutageBasis">A77+A80 · DE-LU + FR + NL + BE</small><div class="kpi-deltas" id="kpiOutageDeltas"></div><small class="kpi-time" id="kpiOutageTime">Reference time: —</small>
+    </div>
+
+    <div class="kpi">
+      <div class="kpi-label"><span>System stress</span><span class="info" tabindex="0">i<span class="tooltip"><b>Real-time balancing stress signal</b><br>The KPI prefers ENTSO-E <b>A86 total imbalance volume</b> (MWh per ISP / MTU). If A86 is unavailable, it falls back to <b>A83 net aFRR + mFRR activation</b> (MW).<br><br>Because those are different physical quantities, the unit next to the KPI changes with the basis and Panel 5 plots them separately. Treat this as a system-state monitor, not a standalone trade signal. A85 imbalance prices are shown separately.</span></span></div>
+      <strong id="kpiStress">—</strong><small id="kpiStressBasis">A86 / A83</small><div class="kpi-deltas" id="kpiStressDeltas"></div><small class="kpi-time" id="kpiStressTime">Latest MTU: —</small>
+    </div>
+  </section>
+
+  <main class="grid">
+    <article class="card span2 renewable-card">
+      <div class="cardhead">
+        <div><h2>1 · Renewables</h2><p>Actual vs current forecast vs 08:00 intraday snapshot vs 18:00 D-1 day-ahead snapshot</p></div>
+        <div class="badge" id="statusRenewables">idle</div>
+      </div>
+      <div class="renewable-grid">
+        <section class="renewable-panel"><h3>Solar</h3><div id="renewableSolar" class="chart renewable-chart renewable-chart-small"></div></section>
+        <section class="renewable-panel"><h3>Wind onshore</h3><div id="renewableOnshore" class="chart renewable-chart renewable-chart-small"></div></section>
+        <section class="renewable-panel"><h3>Wind offshore</h3><div id="renewableOffshore" class="chart renewable-chart renewable-chart-small"></div></section>
+      </div>
+      <section class="renewable-panel renewable-total-panel">
+        <div class="renewable-total-head"><h3>Total renewables · Solar + wind onshore + wind offshore</h3><span id="renewableBasis" class="mini-note"></span></div>
+        <div id="renewableTotal" class="chart renewable-chart renewable-chart-total"></div>
+      </section>
+    </article>
+
+    <article class="card">
+      <div class="cardhead"><div><h2>2 · Load / residual load</h2><p>Actual residual load vs day-ahead residual forecast; no mixed forecast vintages</p></div><div class="badge" id="statusLoad">idle</div></div>
+      <div id="load" class="chart"></div>
+    </article>
+
+    <article class="card">
+      <div class="cardhead"><div><h2>3 · Cross-border</h2><p>Physical vs day-ahead scheduled net flow · Total = selected borders</p></div><div class="badge" id="statusBorders">idle</div></div>
+      <div class="inline-controls">
+        <label>View <select id="borderView"><option value="TOTAL">Total</option></select></label>
+        <details><summary>Borders</summary><div id="neighborChecks" class="checks"></div></details>
+      </div>
+      <div id="borders" class="chart"></div>
+    </article>
+
+    <article class="card event-card" id="outageCard">
+      <div class="cardhead"><div><h2>4 · Generation outages</h2><p>Active and upcoming reportable A77/A80 events · DE-LU + FR + NL + BE</p></div><div class="badge" id="statusOutages">idle</div></div>
+      <div class="panel-metrics" id="outageSummary"></div>
+      <div class="empty-state hidden" id="outageEmpty">
+        <div class="empty-state-kicker">A77 / A80</div>
+        <strong>No reportable outage event returned</strong>
+        <p>No reportable A77/A80 event was found for the selected delivery day and scope. This is intentionally not rendered as a zero-line chart.</p>
+        <div class="source-health" id="outageSources"></div>
+      </div>
+      <div id="outages" class="chart outage-chart"></div>
+      <div class="tablewrap" id="outageTableWrap"><table><thead><tr><th>Status</th><th>Zone</th><th>Unit</th><th>Unavailable</th><th>Window</th></tr></thead><tbody id="outageTable"></tbody></table></div>
+    </article>
+
+    <article class="card stress-card">
+      <div class="cardhead"><div><h2>5 · System stress</h2><p>ENTSO-E A83 activated balancing · A85 imbalance price · A86 imbalance volume</p></div><div class="badge" id="statusBalancing">idle</div></div>
+      <div class="source-health" id="stressSources"></div>
+      <div class="panel-metrics" id="stressSummary"></div>
+      <div class="empty-state hidden" id="stressEmpty">
+        <div class="empty-state-kicker">A83 / A85 / A86</div>
+        <strong>No German system-stress series returned</strong>
+        <p>ENTSO-E did not return usable balancing activation, imbalance volume or imbalance price for the selected day/scope. The dashboard shows this explicitly instead of drawing empty axes.</p>
+      </div>
+      <div class="stress-subpanel" id="stressVolumeSection">
+        <div class="subpanel-head"><span>A86 · Imbalance volume <span class="info" tabindex="0">i<span class="tooltip"><b>What is A86?</b><br>ENTSO-E Total Imbalance Volume is the aggregated system imbalance for each imbalance settlement period (ISP / MTU). It is an <b>energy volume in MWh</b>, not an instantaneous MW level.<br><br>In the source data, surplus/excess and deficit are distinguished. This dashboard keeps the sign returned/derived from the ENTSO-E series: positive indicates surplus/excess and negative indicates deficit when the source uses that convention.<br><br>This is the system imbalance that remained to be settled; it is <b>not</b> the same thing as the amount of balancing energy activated.</span></span></span><small id="stressVolumeTime">Latest MTU: —</small></div>
+        <div id="stressVolume" class="chart stress-chart"></div>
+      </div>
+      <div class="stress-subpanel hidden" id="stressActivationSection">
+        <div class="subpanel-head"><span>A83 · Net activation <span class="info" tabindex="0">i<span class="tooltip"><b>What is A83?</b><br>ENTSO-E A83 is activated balancing energy by reserve type and direction. Here the dashboard requests <b>aFRR (A96)</b> and <b>mFRR (A97)</b> across the four German control areas and nets Up minus Down.<br><br><b>Positive</b> means net upward activation: more generation / less consumption was activated. <b>Negative</b> means net downward activation: less generation / more consumption was activated.<br><br>A83 is shown in <b>MW per balancing time unit</b>. It tells you what balancing action was activated, whereas A86 tells you the resulting imbalance volume.</span></span></span><small id="stressActivationTime">Latest MTU: —</small></div>
+        <div id="stressActivation" class="chart stress-chart"></div>
+      </div>
+      <div class="mini-empty hidden" id="stressActivationEmpty">A83 aFRR/mFRR activation not returned for the selected German control areas.</div>
+      <div class="stress-subpanel" id="stressPriceSection">
+        <div class="subpanel-head"><span>A85 · Imbalance price <span class="info" tabindex="0">i<span class="tooltip"><b>What is A85?</b><br>ENTSO-E imbalance price per imbalance settlement period. Depending on the market design, positive/negative imbalance prices may be identical (single pricing) or differ (dual pricing). The dashboard shows Long and Short separately when both are published.</span></span></span><small id="stressPriceTime">Latest MTU: —</small></div>
+        <div id="stressPrice" class="chart stress-price-chart"></div>
+      </div>
+      <div class="mini-empty hidden" id="stressPriceEmpty">A85 imbalance price not returned for the selected German scope.</div>
+    </article>
+  </main>
+
+  <footer>Source: ENTSO-E Transparency Platform Web API. This is a desk monitor, not a settlement-grade system. ENTSO-E data may be revised, delayed or unavailable per series.</footer>
+
+<script>
+const REFRESH_SECONDS = Number('__REFRESH_SECONDS__');
+const ALL = ['FR','NL','BE','DK_1','DK_2','AT','CH','CZ','PL','SE_4','NO_2'];
+const DEFAULTS = new Set(ALL);
+const state = { borderData: null, timer: null, freshness: {} };
+const layoutBase = {
+  paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
+  font:{color:'#cbd5e1', family:'Inter, ui-sans-serif, system-ui'},
+  margin:{l:55,r:18,t:15,b:48}, hovermode:'x unified',
+  xaxis:{gridcolor:'#1f2937', zerolinecolor:'#334155', tickformat:'%H:%M'},
+  yaxis:{gridcolor:'#1f2937', zerolinecolor:'#64748b', title:'MW'},
+  legend:{orientation:'h', y:-0.22, x:0}
+};
+const config = {responsive:true, displaylogo:false, modeBarButtonsToRemove:['lasso2d','select2d']};
+const compactViewport = window.matchMedia('(max-width: 720px)');
+function responsivePlotLayout(layout){
+  if(!compactViewport.matches) return layout;
+  const margin=layout?.margin||{};
+  const legend=layout?.legend||{};
+  return {
+    ...layout,
+    font:{...(layout?.font||{}),size:10},
+    margin:{...margin,l:Math.min(Number(margin.l||55),44),r:Math.min(Number(margin.r||18),8)},
+    legend:{...legend,font:{...(legend.font||{}),size:9}}
+  };
+}
+function responsivePlotConfig(){ return {...config,displayModeBar:!compactViewport.matches}; }
+function renderPlot(id,data,layout){ return Plotly.react(id,data,responsivePlotLayout(layout),responsivePlotConfig()); }
+function fmt(v){ if(v===null || v===undefined || Number.isNaN(Number(v))) return '—'; const n=Number(v); return `${n>=0?'+':''}${Math.round(n).toLocaleString('de-DE')} MW`; }
+function fmtUnsigned(v){ if(v===null || v===undefined || Number.isNaN(Number(v))) return '—'; return `${Math.round(Number(v)).toLocaleString('de-DE')} MW`; }
+function fmtPrice(v){ if(v===null || v===undefined || Number.isNaN(Number(v))) return '—'; return `${Number(v).toLocaleString('de-DE',{maximumFractionDigits:2})} €/MWh`; }
+function fmtDelta(v){ if(v===null || v===undefined || Number.isNaN(Number(v))) return '—'; const n=Number(v); const sign=n>=0?'+':'−'; const a=Math.abs(n); if(a>=1000) return `${sign}${(a/1000).toLocaleString('de-DE',{maximumFractionDigits:1})} GW`; return `${sign}${Math.round(a).toLocaleString('de-DE')} MW`; }
+function points(arr){ return {x:(arr||[]).map(p=>p.t), y:(arr||[]).map(p=>p.v)}; }
+function trace(name, arr, opts={}){ const p=points(arr); return {name,x:p.x,y:p.y,type:'scatter',mode:'lines',...opts}; }
+function setStatus(id,text,ok=true){ const e=document.getElementById(id); e.textContent=text; e.className='badge '+(ok?'ok':'bad'); }
+function fmtUnit(v,unit){ if(v===null || v===undefined || Number.isNaN(Number(v))) return '—'; const n=Number(v); const sign=n>=0?'+':''; return `${sign}${Math.round(n).toLocaleString('de-DE')} ${unit||''}`.trim(); }
+function setKpi(id,v,unit='MW'){ document.getElementById(id).textContent=unit==='MW'?fmt(v):fmtUnit(v,unit); }
+function setDeltas(id,c){ const e=document.getElementById(id); c=c||{}; e.innerHTML=`<span>Δ15m <b>${fmtDelta(c.d15_mw)}</b></span><span>Δ30m <b>${fmtDelta(c.d30_mw)}</b></span><span>Δ60m <b>${fmtDelta(c.d60_mw)}</b></span>`; }
+function fmtTime(iso){ if(!iso) return '—'; const d=new Date(iso); if(Number.isNaN(d.getTime())) return '—'; return d.toLocaleTimeString('de-DE',{timeZone:'Europe/Berlin',hour:'2-digit',minute:'2-digit'}); }
+function setTime(id,iso,prefix='Latest MTU'){ document.getElementById(id).textContent=`${prefix}: ${fmtTime(iso)}`; }
+function day(){ return document.getElementById('day').value; }
+function selectedNeighbors(){ return [...document.querySelectorAll('#neighborChecks input:checked')].map(x=>x.value); }
+async function getJson(url){ const r=await fetch(url); const body=await r.json(); if(!r.ok) throw new Error(body.detail || r.statusText); return body; }
+function apiUrl(path, force=false, extra=''){ const q=new URLSearchParams({day:day()}); if(force) q.set('force','true'); if(extra) for(const [k,v] of new URLSearchParams(extra)) q.set(k,v); return `${path}?${q}`; }
+function escapeHtml(x){return String(x||'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
+function hasPoints(arr){ return Array.isArray(arr) && arr.length>0; }
+function show(id,yes){ document.getElementById(id)?.classList.toggle('hidden',!yes); }
+
+function setFreshness(key,iso){ state.freshness[key]=iso||null; updateFreshness(); }
+function updateFreshness(){
+  const items=[['freshRes','RES actual through','res'],['freshLoad','Load through','load'],['freshFlows','Flows through','flows'],['freshOutages','Outages ref','outages'],['freshStress','System stress through','stress']];
+  items.forEach(([id,label,key])=>{ const e=document.getElementById(id); const iso=state.freshness[key]; e.textContent=`${label} ${fmtTime(iso)}`; e.classList.toggle('missing',!iso); });
+}
+function metric(label,value,sub=''){ return `<div class="panel-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong>${sub?`<small>${escapeHtml(sub)}</small>`:''}</div>`; }
+function metricInfo(label,value,sub,tip){ return `<div class="panel-metric"><span class="metric-label-info">${escapeHtml(label)} <span class="info" tabindex="0">i<span class="tooltip">${tip}</span></span></span><strong>${escapeHtml(value)}</strong>${sub?`<small>${escapeHtml(sub)}</small>`:''}</div>`; }
+function sourceChip(code,entry){ const state=entry?.state||'no_data'; const label=entry?.label||code; const scope=entry?.scope&&entry.scope!=='none'?` · ${entry.scope}`:''; const stateLabel=state==='ok'?'available':state==='error'?'error':'no data'; return `<span class="source-chip ${state}"><b>${code}</b> ${escapeHtml(label)} · ${stateLabel}${escapeHtml(scope)}</span>`; }
+
+function renewableTraces(s, prefix){
+  return [
+    trace('Actual',s[`${prefix} Actual`],{line:{width:2.8}}),
+    trace('Current',s[`${prefix} Current`],{line:{width:2.2}}),
+    trace('Intraday 08:00',s[`${prefix} Intraday`],{line:{dash:'dash',width:1.8}}),
+    trace('Day-ahead 18:00 D-1',s[`${prefix} Day-ahead`],{line:{dash:'dot',width:1.8}})
+  ];
+}
+function renewableLayout(compact=false){ return {...layoutBase,margin:compact?{l:48,r:12,t:8,b:62}:{l:55,r:18,t:8,b:55},yaxis:{...layoutBase.yaxis,title:compact?'MW':'Generation MW'},legend:{orientation:'h',y:-0.25,x:0,font:{size:compact?10:11}},hovermode:'x unified'}; }
+function drawRenewables(d){
+  const s=d.series||{};
+  renderPlot('renewableSolar',renewableTraces(s,'Solar'),renewableLayout(true),config);
+  renderPlot('renewableOnshore',renewableTraces(s,'Wind Onshore'),renewableLayout(true),config);
+  renderPlot('renewableOffshore',renewableTraces(s,'Wind Offshore'),renewableLayout(true),config);
+  renderPlot('renewableTotal',renewableTraces(s,'RES'),renewableLayout(false),config);
+  setKpi('kpiRes',d.kpi?.res_error_mw); setDeltas('kpiResDeltas',d.kpi?.changes);
+  const basis=d.kpi?.forecast_basis; const basisLabel=basis==='current'?'current forecast':basis==='intraday'?'intraday 08:00':basis==='day-ahead'?'day-ahead 18:00 D-1':'forecast';
+  document.getElementById('kpiResBasis').textContent=`Actual − ${basisLabel}`; setTime('kpiResTime',d.kpi?.as_of,'Latest common MTU');
+  setKpi('kpiRevision',d.kpi?.next4h_revision_avg_mw);
+  const min=d.kpi?.next4h_revision_min_mw,max=d.kpi?.next4h_revision_max_mw;
+  document.getElementById('kpiRevisionRange').innerHTML=`<span>Low <b>${fmtDelta(min)}</b></span><span>High <b>${fmtDelta(max)}</b></span><span>MTUs <b>${d.kpi?.next4h_points??'—'}</b></span>`;
+  const ws=d.kpi?.next4h_window_start,we=d.kpi?.next4h_window_end; document.getElementById('kpiRevisionTime').textContent=ws&&we?`Forward window: ${fmtTime(ws)}–${fmtTime(we)}`:'Forward window: unavailable';
+  const issued=fmtTime(d.kpi?.forecast_issued_at); document.getElementById('renewableBasis').textContent=issued==='—'?'Current = latest ENTSO-E forecast update':`Current forecast document issued ${issued}`;
+  setFreshness('res',d.freshness?.actual_through);
+}
+function drawLoad(d){
+  const s=d.series||{}; const tr=[trace('Load actual',s['Load Actual']),trace('Load DA forecast',s['Load Forecast'],{line:{dash:'dot'}}),trace('Residual actual',s['Residual Load Actual'],{line:{width:3}}),trace('Residual DA forecast',s['Residual Load Forecast'],{line:{dash:'dot',width:2}})];
+  renderPlot('load',tr,{...layoutBase,yaxis:{...layoutBase.yaxis,title:'MW'}},config);
+  setKpi('kpiResidual',d.kpi?.residual_load_mw); setDeltas('kpiResidualDeltas',d.kpi?.changes); setTime('kpiResidualTime',d.kpi?.as_of,'Latest common MTU');
+  const surprise=d.kpi?.residual_surprise_mw; document.getElementById('kpiResidualBasis').textContent=surprise===null||surprise===undefined?'Actual load − actual RES':`Vs DA residual: ${fmt(surprise)}`;
+  setFreshness('load',d.freshness?.actual_through);
+}
+function drawBorders(){
+  const d=state.borderData; if(!d) return; const v=document.getElementById('borderView').value; let phys,sched;
+  if(v==='TOTAL'){ phys=d.series?.['Net Physical Import']; sched=d.series?.['Net DA Schedule']; } else { phys=d.borders?.[v]?.physical; sched=d.borders?.[v]?.scheduled; }
+  renderPlot('borders',[trace('Physical net import',phys,{line:{width:3}}),trace('DA scheduled net import',sched,{line:{dash:'dot'}})],{...layoutBase,yaxis:{...layoutBase.yaxis,title:'MW (+ import / − export)',zeroline:true,zerolinewidth:2}},config);
+  setKpi('kpiImport',d.kpi?.net_import_mw); setDeltas('kpiImportDeltas',d.kpi?.changes); setTime('kpiImportTime',d.kpi?.as_of,'Latest MTU');
+  const delta=d.kpi?.vs_da_schedule_mw; const n=(d.kpi?.selected_borders||[]).length; document.getElementById('kpiImportBasis').textContent=delta===null||delta===undefined?`${n} selected borders`:`Vs DA schedule: ${fmt(delta)}`;
+  setFreshness('flows',d.freshness?.physical_through);
+}
+function drawOutages(d){
+  setKpi('kpiOutage',d.kpi?.unavailable_mw); setDeltas('kpiOutageDeltas',d.kpi?.changes); setTime('kpiOutageTime',d.kpi?.as_of,'Reference time'); document.getElementById('kpiOutageBasis').textContent=d.kpi?.scope||'A77+A80 · DE-LU + FR + NL + BE'; setFreshness('outages',d.kpi?.as_of);
+  const active=d.kpi?.active_events??0; const nextAt=d.kpi?.next_event_at; const nextUnit=d.kpi?.next_event_unit;
+  document.getElementById('outageSummary').innerHTML=[
+    metric('Active now',fmtUnsigned(d.kpi?.unavailable_mw),`${active} event${active===1?'':'s'}`),
+    metric('Largest active',fmtUnsigned(d.kpi?.largest_active_mw),d.kpi?.largest_active_unit||'—'),
+    metric('Next start',nextAt?fmtTime(nextAt):'—',nextUnit||'No upcoming event'),
+    metric('Events in day',String(d.kpi?.reportable_events??0),'reportable A77/A80')
+  ].join('');
+  const status=d.source_status||{}; document.getElementById('outageSources').innerHTML=Object.entries(status).map(([z,docs])=>`<span class="source-chip ${Object.values(docs).some(x=>x==='error')?'error':Object.values(docs).some(x=>x==='ok')?'ok':'no_data'}"><b>${z}</b> A77 ${docs.A77||'—'} · A80 ${docs.A80||'—'}</span>`).join('');
+  const hasEvents=(d.kpi?.reportable_events||0)>0; show('outageEmpty',!hasEvents); show('outages',hasEvents); show('outageTableWrap',hasEvents);
+  if(hasEvents){
+    const tr=Object.entries(d.series||{}).map(([k,v])=>trace(k,v,{stackgroup:'one'}));
+    renderPlot('outages',tr,{...layoutBase,margin:{l:55,r:18,t:8,b:50},yaxis:{...layoutBase.yaxis,title:'Unavailable MW'},legend:{orientation:'h',y:-0.2,x:0}},config);
+    document.getElementById('outageTable').innerHTML=(d.top||[]).map(r=>`<tr><td><span class="row-status ${r.active?'active':'upcoming'}">${r.active?'active':'upcoming'}</span></td><td>${escapeHtml(r.zone)}</td><td>${escapeHtml(r.plant)}</td><td>${Math.round(r.unavailable_mw).toLocaleString('de-DE')} MW</td><td>${fmtTime(r.start)}–${fmtTime(r.end)}</td></tr>`).join('') || '<tr><td colspan="5">No active or upcoming event in the remaining delivery day.</td></tr>';
+  }
+}
+function drawBalancing(d){
+  const s=d.series||{}; const src=d.sources||{}; const fresh=d.freshness||{};
+  document.getElementById('stressSources').innerHTML=['A83','A85','A86'].map(code=>sourceChip(code,src[code])).join('');
+
+  const stressUnit=d.kpi?.system_stress_unit||'MW';
+  setKpi('kpiStress',d.kpi?.system_stress_value ?? d.kpi?.system_stress_mw,stressUnit);
+  // Top-card deltas use the same unit as the selected stress basis.
+  const c=d.kpi?.changes||{}; const de=document.getElementById('kpiStressDeltas');
+  const deltaWithUnit=(v)=>{ if(v===null||v===undefined||Number.isNaN(Number(v)))return '—'; const n=Number(v),sign=n>=0?'+':'−',a=Math.abs(n); if(a>=1000){const bigUnit=stressUnit==='MW'?'GW':stressUnit==='MWh'?'GWh':stressUnit; return `${sign}${(a/1000).toLocaleString('de-DE',{maximumFractionDigits:1})} ${bigUnit}`;} return `${sign}${Math.round(a).toLocaleString('de-DE')} ${stressUnit}`; };
+  de.innerHTML=`<span>Δ15m <b>${deltaWithUnit(c.d15_mw)}</b></span><span>Δ30m <b>${deltaWithUnit(c.d30_mw)}</b></span><span>Δ60m <b>${deltaWithUnit(c.d60_mw)}</b></span>`;
+  setTime('kpiStressTime',d.kpi?.as_of,'Latest MTU');
+  document.getElementById('kpiStressBasis').textContent=(d.kpi?.basis||'No A86/A83 signal')+(d.kpi?.basis?` · ${stressUnit}`:'');
+  setFreshness('stress',d.freshness?.latest_through);
+
+  const priceLabel=d.kpi?.imbalance_price_eur_mwh!==null&&d.kpi?.imbalance_price_eur_mwh!==undefined?fmtPrice(d.kpi?.imbalance_price_eur_mwh):`Long ${fmtPrice(d.kpi?.imbalance_price_long_eur_mwh)} · Short ${fmtPrice(d.kpi?.imbalance_price_short_eur_mwh)}`;
+  const a86Tip='<b>A86 · Total Imbalance Volume</b><br>Aggregated system imbalance for one imbalance settlement period (ISP / MTU). ENTSO-E publishes it as an energy volume in <b>MWh</b>. Positive/excess means the area had surplus energy; negative/deficit means it was short, subject to the sign/situation encoded by the source.<br><br>It measures the imbalance to be settled, not the amount of balancing activation.';
+  const a83Tip='<b>A83 · Activated balancing quantities</b><br>The dashboard nets activated <b>aFRR (A96)</b> and <b>mFRR (A97)</b> across the four German control areas: Up is positive, Down is negative.<br><br>Positive = net upward regulation (increase generation / reduce load). Negative = net downward regulation (reduce generation / increase load). Unit: <b>MW per balancing time unit</b>.';
+  const a85Tip='<b>A85 · Imbalance price</b><br>Settlement price for imbalance in the corresponding ISP / MTU, in €/MWh. Long and Short are shown separately where ENTSO-E publishes both.';
+  document.getElementById('stressSummary').innerHTML=[
+    metricInfo('A86 imbalance volume',fmtUnit(d.kpi?.imbalance_volume_mwh ?? d.kpi?.imbalance_volume_mw,'MWh'),`Latest MTU ${fmtTime(fresh.volume_through)}`,a86Tip),
+    metricInfo('A83 net activation',fmt(d.kpi?.net_activation_mw),`Latest MTU ${fmtTime(fresh.activation_through)}`,a83Tip),
+    metricInfo('A85 imbalance price',priceLabel,`Latest MTU ${fmtTime(fresh.price_through)}`,a85Tip)
+  ].join('');
+
+  const hasVolume=hasPoints(s['Net imbalance volume']), hasActivation=hasPoints(s['Net activation']);
+  const hasSingle=hasPoints(s['Imbalance price']),hasLong=hasPoints(s['Imbalance price long']),hasShort=hasPoints(s['Imbalance price short']); const hasPrice=hasSingle||hasLong||hasShort;
+  show('stressEmpty',!hasVolume&&!hasActivation&&!hasPrice);
+  show('stressVolumeSection',hasVolume); show('stressActivationSection',hasActivation); show('stressActivationEmpty',!hasActivation&&(hasVolume||hasPrice));
+  show('stressPriceSection',hasPrice); show('stressPriceEmpty',!hasPrice&&(hasVolume||hasActivation));
+  document.getElementById('stressVolumeTime').textContent=`Latest MTU: ${fmtTime(fresh.volume_through)}`;
+  document.getElementById('stressActivationTime').textContent=`Latest MTU: ${fmtTime(fresh.activation_through)}`;
+  document.getElementById('stressPriceTime').textContent=`Latest MTU: ${fmtTime(fresh.price_through)}`;
+
+  if(hasVolume){
+    renderPlot('stressVolume',[trace('A86 imbalance volume',s['Net imbalance volume'],{line:{width:3}})],{...layoutBase,margin:{l:62,r:15,t:8,b:46},yaxis:{...layoutBase.yaxis,title:'MWh / ISP',zeroline:true,zerolinewidth:2},legend:{orientation:'h',y:-0.22,x:0},hovermode:'x unified'},config);
+  }
+  if(hasActivation){
+    renderPlot('stressActivation',[trace('A83 net aFRR + mFRR',s['Net activation'],{line:{width:2.7}})],{...layoutBase,margin:{l:55,r:15,t:8,b:46},yaxis:{...layoutBase.yaxis,title:'MW',zeroline:true,zerolinewidth:2},legend:{orientation:'h',y:-0.22,x:0},hovermode:'x unified'},config);
+  }
+  if(hasPrice){
+    const tr=[]; if(hasSingle)tr.push(trace('Imbalance price',s['Imbalance price'],{line:{width:2.7}})); if(hasLong)tr.push(trace('Long price',s['Imbalance price long'],{line:{width:2.2}})); if(hasShort)tr.push(trace('Short price',s['Imbalance price short'],{line:{dash:'dot',width:2.2}}));
+    renderPlot('stressPrice',tr,{...layoutBase,margin:{l:62,r:15,t:8,b:46},yaxis:{...layoutBase.yaxis,title:'€/MWh',zeroline:true,zerolinewidth:1},legend:{orientation:'h',y:-0.22,x:0},hovermode:'x unified'},config);
+  }
+}
+
+async function loadPanel(name,url,draw,statusId,errorTargets=null){
+  setStatus(statusId,'loading',true);
+  try{ const d=await getJson(url); draw(d); setStatus(statusId,'live',true); return d; }
+  catch(e){ setStatus(statusId,'error',false); console.error(name,e); const targets=errorTargets||[name]; targets.forEach(target=>{ if(document.getElementById(target)){ show(target,true); renderPlot(target,[],{...layoutBase,annotations:[{text:escapeHtml(e.message),showarrow:false,font:{color:'#fca5a5'}}]},config); } }); return null; }
+}
+async function refresh(force=false){
+  document.getElementById('refresh').disabled=true;
+  const neighbors=selectedNeighbors().join(',');
+  const p1=loadPanel('renewables',apiUrl('/api/renewables',force),drawRenewables,'statusRenewables',['renewableSolar','renewableOnshore','renewableOffshore','renewableTotal']);
+  const p2=loadPanel('load',apiUrl('/api/load',force),drawLoad,'statusLoad');
+  const p3=loadPanel('borders',apiUrl('/api/borders',force,`neighbors=${encodeURIComponent(neighbors)}`),d=>{state.borderData=d; rebuildBorderSelect(d); drawBorders();},'statusBorders');
+  const p4=loadPanel('outages',apiUrl('/api/outages',force),drawOutages,'statusOutages',['outages']);
+  const p5=loadPanel('balancing',apiUrl('/api/balancing',force),drawBalancing,'statusBalancing',['stressVolume','stressActivation','stressPrice']);
+  await Promise.allSettled([p1,p2,p3,p4,p5]);
+  document.getElementById('lastUpdate').textContent='Dashboard refreshed '+new Date().toLocaleTimeString('de-DE'); document.getElementById('refresh').disabled=false;
+}
+function rebuildBorderSelect(d){ const sel=document.getElementById('borderView'); const old=sel.value; sel.innerHTML='<option value="TOTAL">Total</option>'+Object.keys(d.borders||{}).map(x=>`<option value="${x}">${x}</option>`).join(''); if([...sel.options].some(o=>o.value===old))sel.value=old; }
+function initNeighbors(){ document.getElementById('neighborChecks').innerHTML=ALL.map(n=>`<label><input type="checkbox" value="${n}" ${DEFAULTS.has(n)?'checked':''}> ${n}</label>`).join(''); document.querySelectorAll('#neighborChecks input').forEach(x=>x.addEventListener('change',()=>refresh(false))); }
+async function health(){ try{const d=await getJson('/health'); const e=document.getElementById('apiStatus'); e.textContent=d.token_configured?'API token configured':'API token missing'; e.className='pill '+(d.token_configured?'ok':'bad');}catch(e){document.getElementById('apiStatus').textContent='API health error';} }
+function resetTimer(){ if(state.timer)clearInterval(state.timer); if(document.getElementById('auto').checked){state.timer=setInterval(()=>refresh(false),REFRESH_SECONDS*1000);} }
+let resizeRaf=null;
+window.addEventListener('resize',()=>{
+  if(resizeRaf) cancelAnimationFrame(resizeRaf);
+  resizeRaf=requestAnimationFrame(()=>document.querySelectorAll('.chart').forEach(el=>{ if(el && el.data) Plotly.Plots.resize(el); }));
+});
+window.addEventListener('DOMContentLoaded',()=>{
+  const now=new Date(); document.getElementById('day').value=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Berlin'}).format(now); document.getElementById('intervalLabel').textContent=`${Math.round(REFRESH_SECONDS/60)} min`;
+  initNeighbors(); health(); refresh(false); resetTimer();
+  document.getElementById('refresh').addEventListener('click',()=>refresh(true)); document.getElementById('day').addEventListener('change',()=>{state.freshness={};updateFreshness();refresh(false);}); document.getElementById('auto').addEventListener('change',resetTimer); document.getElementById('borderView').addEventListener('change',drawBorders);
+});
+</script>
+</body>
+</html>

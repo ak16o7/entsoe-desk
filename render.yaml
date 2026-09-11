@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: entsoe-desk
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: ENTSOE_API_KEY
+        sync: false
+      - key: ENTSOE_ENDPOINT_URL
+        value: https://web-api.tp.entsoe.eu/api
+      - key: ENTSOE_REFRESH_SECONDS
+        value: "300"
+      - key: ENTSOE_CACHE_SECONDS
+        value: "240"
+      - key: ENTSOE_HTTP_TIMEOUT
+        value: "35"
+      - key: DASHBOARD_USERNAME
+        sync: false
+      - key: DASHBOARD_PASSWORD
+        sync: false
