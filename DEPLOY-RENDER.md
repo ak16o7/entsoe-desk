@@ -1,88 +1,34 @@
-# ENTSO-E Desk v4.3 – Render Deployment / Upgrade
+# Upgrade des bestehenden Render-Dienstes auf v4.4
 
-This package is ready for the existing Render service.
+1. ZIP entpacken. Den **Inhalt** von `entsoe-desk-v4.4-web` in das bestehende Repository übernehmen, sodass `Dockerfile`, `render.yaml` und `app/` weiterhin direkt im bisherigen Repository-/Render-Root liegen. Keine zusätzliche verschachtelte Projektebene anlegen.
+2. Bestehende Render-Variablen, insbesondere `ENTSOE_API_KEY`, erhalten. Das Paket enthält keine `.env`. Optional eingerichtete Basic Auth unverändert beibehalten.
+3. Lokal prüfen:
 
-## If v4.2 is already live
-
-You do **not** need a new Render Blueprint or a new website URL. Replace/update the files in the same local Git repository and push them to the same `main` branch:
-
-```powershell
-git status
-git add .
-git commit -m "Upgrade ENTSO-E Desk to v4.3"
-git push
-```
-
-Render should automatically deploy the new commit. Your existing `https://entsoe-desk.onrender.com/` URL stays the same.
-
-After deployment, open Render → your `entsoe-desk` Web Service → **Events/Logs** and wait for the deploy to become live. Then hard-refresh the browser (`Ctrl+F5`) or open an InPrivate/Incognito window.
-
-## Environment variables on Render
-
-Required:
-
-```text
-ENTSOE_API_KEY=your ENTSO-E token
-```
-
-Recommended defaults are already in `render.yaml`:
-
-```text
-ENTSOE_ENDPOINT_URL=https://web-api.tp.entsoe.eu/api
-ENTSOE_REFRESH_SECONDS=300
-ENTSOE_CACHE_SECONDS=240
-ENTSOE_CACHE_MAX_ENTRIES=256
-ENTSOE_HTTP_TIMEOUT=35
-ENTSOE_MAX_REQUESTS_PER_MINUTE=300
-```
-
-For a public site, **do not create** `DASHBOARD_USERNAME` or `DASHBOARD_PASSWORD`. If those variables still exist from an older deployment, delete them in Render → Web Service → Environment and redeploy.
-
-Optional Basic Auth can still be enabled later by adding both variables manually.
-
-## Security check before pushing
-
-This distribution intentionally contains no `.env` file. Check:
-
-```powershell
-git ls-files .env
-```
-
-It must print nothing. `.env.example` is safe and should remain tracked.
-
-## What changed operationally in v4.3
-
-- Public `force=true` cache bypass was removed.
-- Public `/api/cache/clear` was removed.
-- `Refresh now` respects the server cache instead of hammering ENTSO-E.
-- `/health` is a minimal Render health endpoint.
-- The service retries transient 429/5xx network responses with bounded backoff.
-- Outage requests paginate 200-document pages and suppress totals on incomplete retrieval.
-- Cross-border totals are only shown when all selected borders have compatible MTUs.
-
-## Verify the live deployment
-
-After Render reports a successful deploy, verify:
-
-1. `https://entsoe-desk.onrender.com/` opens without a password prompt.
-2. The footer says **Desk v4.3**.
-3. Panel 5 is titled **Balancing / imbalance**, not System stress.
-4. The source chip is **12.3.E**, not the old A83 activation source.
-5. Cross-border shows a coverage line such as `physical 11/11` or explicitly suppresses Total if incomplete.
-6. Outages show A80/A77 status and selected source per zone; an incomplete source must not show a misleading 0 MW headline.
-7. On a phone, the layout collapses to mobile cards and Plotly remains usable.
-
-## Local test before push (optional)
-
-```powershell
-Copy-Item .env.example .env
-# add ENTSOE_API_KEY to .env
+```bash
+pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
-docker compose up --build
+git diff --stat
+git status
 ```
 
-Open `http://localhost:8000`.
+4. Die geprüften Änderungen auf den bereits von Render verwendeten Branch committen und pushen. Bei aktivem Auto-Deploy baut Render den vorhandenen Service neu; kein neues Blueprint und keine neue URL nötig.
+5. Nach erfolgreichem Build `/health` aufrufen: `version` muss `4.4.0` und `configured` muss `true` sein. Browser vollständig neu laden.
+6. HTTP-Smoke-Test:
 
-## Free Render limitation
+```bash
+python scripts/smoke_http.py --base-url https://entsoe-desk.onrender.com --day 2026-09-10
+```
 
-A free Render Web Service can sleep after inactivity. The first request after sleep may therefore take noticeably longer. That is a hosting limitation, not an ENTSO-E data error.
+Panel 4 muss Meldungen und eine plausible Kapazität anzeigen oder fehlende Abdeckung ausdrücklich melden. Panel 5 muss bei nicht publizierenden Gebieten `partial` und verfügbare Gebietsreihen zeigen. `partial` allein ist kein Deploymentfehler. Niemals fehlende Gebiete durch eine Null ersetzen.
+
+## Betrieb
+
+Docker startet einen Uvicorn-Prozess auf `${PORT:-8000}`. Der bestehende Cache, optionale Basic Auth und der prozesslokale API-Limiter bleiben erhalten. Der Limiter ist nicht zwischen mehreren Instanzen synchronisiert; zusätzliche Worker/Instanzen erhöhen das gemeinsame ENTSO-E-Abfragevolumen. Browser-Refresh respektiert den Servercache. Free-Tier-Kaltstarts können länger dauern.
+
+## Rollback
+
+Den vorherigen v4.3-Commit im bestehenden Render-Service erneut deployen. Keine Datenbankmigration und keine neuen Secrets erforderlich.
+
+## Prüfstand
+
+Python-/HTTP-/Browser- und echte ENTSO-E-Tests wurden lokal ausgeführt. Docker/Render selbst wurde in dieser Umgebung nicht gebaut beziehungsweise deployt. Das bestehende Live-Deployment wurde nicht verändert. Das ZIP ist für den bestehenden Buildablauf vorbereitet; der Render-Build bleibt der abschließende Infrastrukturtest.

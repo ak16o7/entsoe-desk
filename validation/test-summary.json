@@ -1,0 +1,13 @@
+{
+  "tests": 50,
+  "passed": 50,
+  "failed": 0,
+  "live_xml_series": 45,
+  "live_xml_points": 4320,
+  "python": "3.13.14",
+  "pip_check": "passed",
+  "http_smoke": "all five routes and health passed",
+  "browser": "desktop and mobile, 10 plots, no JS errors",
+  "docker_build": "not run - unavailable",
+  "render_deployment": "not performed"
+}

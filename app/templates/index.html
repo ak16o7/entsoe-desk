@@ -128,7 +128,7 @@
         <div id="stressVolume" class="chart stress-chart"></div>
       </div>
       <div class="stress-subpanel hidden" id="stressActivationSection">
-        <div class="subpanel-head"><span>GL EB 12.3.E · Activated balancing energy <span class="info" tabindex="0">i<span class="tooltip"><b>Current balancing activation source</b><br>The legacy 17.1.E/A83 publication was discontinued. The desk uses <b>A24 Aggregated Balancing Energy Bids</b>: process <b>A51 for aFRR</b> and <b>A47 for mFRR</b>. Activated quantity is taken from the published secondary quantity; Up is positive and Down negative.<br><br>aFRR and mFRR are plotted separately. A combined net line is only produced when both reserve types have data at the same MTU.</span></span></span><small id="stressActivationTime">Latest MTU: —</small></div>
+        <div class="subpanel-head"><span>GL EB 12.3.E · Activated balancing energy <span class="info" tabindex="0">i<span class="tooltip"><b>Current balancing activation source</b><br>The legacy 17.1.E/A83 publication was discontinued. The desk uses <b>A24 Aggregated Balancing Energy Bids</b>: four German LFA/SCA with <b>A67/A68 for aFRR</b> and <b>A60/A61 for mFRR</b>; A51/A47 only fill missing activated values. Activated quantity is taken from the published secondary quantity; Up is positive and Down negative.<br><br>aFRR and mFRR are plotted separately. A combined net line is only produced when both reserve types and all four areas have data at the same MTU.</span></span></span><small id="stressActivationTime">Latest MTU: —</small></div>
         <div id="stressActivation" class="chart stress-chart"></div>
       </div>
       <div class="mini-empty hidden" id="stressActivationEmpty">GL EB 12.3.E activated aFRR/mFRR was not returned completely for the selected DE-LU scope.</div>
@@ -140,7 +140,7 @@
     </article>
   </main>
 
-  <footer>Source: ENTSO-E Transparency Platform Web API · Desk v4.3. Data-quality guards include R3/A03 block expansion, complete-border totals, outage pagination/revision handling and unit-stable balancing KPIs. This remains a desk monitor, not a settlement-grade system; ENTSO-E data may be revised, delayed or unavailable per series.</footer>
+  <footer>Source: ENTSO-E Transparency Platform Web API · Desk v4.4. Data-quality guards include R3/A03 block expansion, complete-border totals, outage pagination/revision handling and unit-stable balancing KPIs. This remains a desk monitor, not a settlement-grade system; ENTSO-E data may be revised, delayed or unavailable per series.</footer>
 
 <script>
 const REFRESH_SECONDS = Number('__REFRESH_SECONDS__');
@@ -266,7 +266,7 @@ function drawOutages(d){
   ].join('');
   const status=d.source_status||{}, selected=d.selected_source||{}, pages=d.page_counts||{};
   document.getElementById('outageSources').innerHTML=Object.entries(status).map(([z,docs])=>{
-    const vals=Object.values(docs), cls=vals.some(x=>x==='error'||x==='truncated')?'error':selected[z]&&selected[z]!=='no events'?'ok':'no_data';
+    const vals=Object.values(docs), cls=vals.some(x=>x==='error'||x==='truncated'||x==='parse_error')?'error':selected[z]&&selected[z]!=='no events'?'ok':'no_data';
     const page=` · pages A80 ${pages[z]?.A80??0}/A77 ${pages[z]?.A77??0}`;
     return `<span class="source-chip ${cls}"><b>${z}</b> A80 ${docs.A80||'—'} · A77 ${docs.A77||'—'} · use ${escapeHtml(selected[z]||'none')}${page}</span>`;
   }).join('');
@@ -274,7 +274,7 @@ function drawOutages(d){
   show('outageEmpty',!hasEvents||!complete); show('outages',hasEvents&&complete); show('outageTableWrap',hasEvents);
   if(!complete){
     document.getElementById('outageEmptyTitle').textContent='Outage coverage incomplete — zero suppressed';
-    document.getElementById('outageEmptyText').textContent='At least one selected outage source failed or was truncated. Partial rows may still be listed below, but the dashboard does not present them as a complete MW total.';
+    document.getElementById('outageEmptyText').textContent='At least one source failed, was truncated, or has an unknown nominal/available capacity. Partial rows may still be listed below, but the dashboard does not present them as a complete MW total.';
   } else {
     document.getElementById('outageEmptyTitle').textContent='No reportable outage event returned';
     document.getElementById('outageEmptyText').textContent='The queried A80-primary / A77-fallback scope returned no selected reportable outage event for this delivery day. This is intentionally not rendered as a zero-line chart.';
@@ -284,7 +284,7 @@ function drawOutages(d){
     renderPlot('outages',tr,{...layoutBase,margin:{l:55,r:18,t:8,b:50},yaxis:{...layoutBase.yaxis,title:'Unavailable MW'},legend:{orientation:'h',y:-0.2,x:0}},config);
   }
   if(hasEvents){
-    document.getElementById('outageTable').innerHTML=(d.top||[]).map(r=>`<tr><td><span class="row-status ${r.active?'active':'upcoming'}">${r.active?'active':'upcoming'}</span></td><td>${escapeHtml(r.zone)}</td><td>${escapeHtml(r.plant)}</td><td>${Math.round(r.unavailable_mw).toLocaleString('de-DE')} MW</td><td>${fmtTime(r.start)}–${fmtTime(r.end)}</td></tr>`).join('') || '<tr><td colspan="5">No active or upcoming event in the remaining delivery day.</td></tr>';
+    document.getElementById('outageTable').innerHTML=(d.top||[]).map(r=>`<tr><td><span class="row-status ${r.active?'active':'upcoming'}">${r.active?'active':'upcoming'}</span></td><td>${escapeHtml(r.zone)}</td><td>${escapeHtml(r.plant)}</td><td>${r.unavailable_mw==null?'unknown':Math.round(r.unavailable_mw).toLocaleString('de-DE')+' MW'}</td><td>${new Date(r.start).toLocaleString('de-DE',{timeZone:'Europe/Berlin'})}–${new Date(r.end).toLocaleString('de-DE',{timeZone:'Europe/Berlin'})}</td></tr>`).join('') || '<tr><td colspan="5">No active or upcoming event in the remaining delivery day.</td></tr>';
   }
 }
 function drawBalancing(d){
@@ -302,23 +302,30 @@ function drawBalancing(d){
 
   const priceLabel=d.kpi?.imbalance_price_eur_mwh!==null&&d.kpi?.imbalance_price_eur_mwh!==undefined?fmtPrice(d.kpi?.imbalance_price_eur_mwh):`Long ${fmtPrice(d.kpi?.imbalance_price_long_eur_mwh)} · Short ${fmtPrice(d.kpi?.imbalance_price_short_eur_mwh)}`;
   const a86Tip='<b>A86 · Total Imbalance Volume</b><br>Energy volume per imbalance settlement period in <b>MWh</b>. The desk keeps this separate from activated balancing quantities: there is no MW fallback into the headline KPI.';
-  const activationTip='<b>GL EB 12.3.E · A24</b><br>Activated quantities from Aggregated Balancing Energy Bids. Process A51 = aFRR; A47 = mFRR. Up is positive and Down negative. The total net line requires both reserve types on the same MTU; otherwise the available component is still shown as partial.';
+  const activationTip='<b>GL EB 12.3.E · A24</b><br>Activated quantities from Aggregated Balancing Energy Bids. A67/A68 = aFRR Central/Local; A60/A61 = mFRR Scheduled/Direct. A51/A47 are fallback only, selected per area, product, direction and MTU. Up is positive and Down negative. The total net line requires both reserve types on the same MTU; otherwise the available component is still shown as partial.';
   const a85Tip='<b>A85 · Imbalance price</b><br>Settlement price for imbalance in the corresponding ISP / MTU, in €/MWh. Long and Short can be equal under single pricing.';
   const actValue=d.kpi?.net_activation_mw!==null&&d.kpi?.net_activation_mw!==undefined?fmt(d.kpi?.net_activation_mw):`aFRR ${fmt(d.kpi?.afrr_net_mw)} · mFRR ${fmt(d.kpi?.mfrr_net_mw)}`;
   document.getElementById('stressSummary').innerHTML=[
     metricInfo('A86 imbalance volume',fmtUnit(d.kpi?.imbalance_volume_mwh,'MWh'),`Latest MTU ${fmtTime(fresh.volume_through)} · ${stateLabel}`,a86Tip),
-    metricInfo('12.3.E net activation',actValue,`Latest MTU ${fmtTime(fresh.activation_through)}`,activationTip),
+    metricInfo('12.3.E net activation',actValue,src['12.3.E']?.state==='partial'?'Incomplete Germany coverage · area curves below':`Latest MTU ${fmtTime(fresh.activation_through)}`,activationTip),
     metricInfo('A85 imbalance price',priceLabel,`Latest MTU ${fmtTime(fresh.price_through)}`,a85Tip)
   ].join('');
 
+  const areaTraces=[];
+  for(const [family,areas] of Object.entries(d.activation_areas||{})){
+    for(const [area,values] of Object.entries(areas)){
+      if(hasPoints(values.net)) areaTraces.push(trace(`${family} · ${area}`,values.net,{line:{width:1.5,dash:family==='mFRR'?'dot':'solid'}}));
+    }
+  }
+  document.getElementById('stressSources').innerHTML += Object.entries(d.activation_areas||{}).flatMap(([family,areas])=>Object.entries(areas).map(([area,v])=>`<span class="source-chip ${escapeHtml(v.state)}"><b>${escapeHtml(family)} ${escapeHtml(area)}</b> ${escapeHtml(v.state)} · ${escapeHtml(v.selected_processes.join('/'))||'no activation'}</span>`)).join('');
   const hasVolume=hasPoints(s['Net imbalance volume']);
-  const hasAfrr=hasPoints(s['aFRR net']), hasMfrr=hasPoints(s['mFRR net']), hasActivationTotal=hasPoints(s['Net activation']), hasActivation=hasAfrr||hasMfrr||hasActivationTotal;
+  const hasAfrr=hasPoints(s['aFRR net']), hasMfrr=hasPoints(s['mFRR net']), hasActivationTotal=hasPoints(s['Net activation']), hasActivation=hasAfrr||hasMfrr||hasActivationTotal||areaTraces.length>0;
   const hasSingle=hasPoints(s['Imbalance price']),hasLong=hasPoints(s['Imbalance price long']),hasShort=hasPoints(s['Imbalance price short']); const hasPrice=hasSingle||hasLong||hasShort;
   show('stressEmpty',!hasVolume&&!hasActivation&&!hasPrice);
   show('stressVolumeSection',hasVolume); show('stressActivationSection',hasActivation); show('stressActivationEmpty',!hasActivation&&(hasVolume||hasPrice));
   show('stressPriceSection',hasPrice); show('stressPriceEmpty',!hasPrice&&(hasVolume||hasActivation));
   document.getElementById('stressVolumeTime').textContent=`Latest MTU: ${fmtTime(fresh.volume_through)}`;
-  document.getElementById('stressActivationTime').textContent=`Latest MTU: ${fmtTime(fresh.activation_through)}`;
+  document.getElementById('stressActivationTime').textContent=`DE total: ${src['12.3.E']?.state||'unknown'} · available areas shown separately`;
   document.getElementById('stressPriceTime').textContent=`Latest MTU: ${fmtTime(fresh.price_through)}`;
 
   if(hasVolume){
@@ -326,6 +333,7 @@ function drawBalancing(d){
   }
   if(hasActivation){
     const tr=[]; if(hasActivationTotal) tr.push(trace('Net aFRR + mFRR',s['Net activation'],{line:{width:3}})); if(hasAfrr) tr.push(trace('aFRR net',s['aFRR net'],{line:{width:2}})); if(hasMfrr) tr.push(trace('mFRR net',s['mFRR net'],{line:{dash:'dot',width:2}}));
+    tr.push(...areaTraces);
     renderPlot('stressActivation',tr,{...layoutBase,margin:{l:55,r:15,t:8,b:46},yaxis:{...layoutBase.yaxis,title:'MW',zeroline:true,zerolinewidth:2},legend:{orientation:'h',y:-0.22,x:0},hovermode:'x unified'},config);
   }
   if(hasPrice){

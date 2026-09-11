@@ -1,138 +1,48 @@
-# ENTSO-E Desk v4.3
+# ENTSO-E Desk v4.4
 
-Browser-based short-term power-market monitor for Germany / Central Europe. The backend is FastAPI/Python, polls the ENTSO-E Transparency Platform Web API, caches fan-out requests server-side and renders a responsive Plotly dashboard.
+FastAPI/Python + lokal gebündeltes Plotly für das bestehende Render/GitHub-Deployment. Die fünf API-Routen und die Umgebungsvariablen bleiben kompatibel.
 
-## What v4.3 changes
+## Änderungen
 
-v4.3 is primarily a data-quality hardening release.
+- Panel 4 liest die vollständigen R3-XML-Elementnamen für nominalP, Generationseinheit, Produktionsanlage, PSR-Typ, Standort und Zeitgrenzen. Verfügbarkeit wird als Nennleistung minus verfügbare MW berechnet. Unbekannte Kapazitäten bleiben unbekannt, Ereignisse werden trotzdem gezählt. Stornierungen ohne Punkte, A01/A03, Revisionen und Pagination sind abgedeckt. Überlappende Meldungen desselben Ressourcen-EIC tragen maximal die größte gleichzeitig gemeldete Einschränkung bei.
+- Panel 5 fragt A24/12.3.E je deutscher LFA/SCA ab: 50Hertz, Amprion, TenneT DE, TransnetBW. Primär A67/A68 (aFRR Central/Local) und A60/A61 (mFRR Scheduled/Direct). A51/A47 füllen ausschließlich fehlende aktivierte Werte desselben Gebiets, Produkts, derselben Richtung und Viertelstunde. Eine veröffentlichte Null hat Vorrang vor dem Fallback. Angebotene, aktivierte und nicht verfügbare Mengen bleiben getrennt.
+- Deutschland-Aktivierung erfordert alle vier Gebiete und beide Richtungen am selben Zeitpunkt. Verfügbare Gebietsreihen bleiben bei `partial` sichtbar. Fehlende Gebiete werden nicht zu null. Die Quellenmatrix im JSON zeigt jeden Prozessstatus.
+- A85 bleibt EUR/MWh, A86 bleibt MWh je ISP. A86 summiert nur gemeinsame Zeitpunkte aller vier Gebiete. Unterschiedliche Gebietspreise werden nicht zu einem erfundenen Abrechnungspreis gemittelt.
+- UTC-Zeitrechnung bewahrt 92/100 Viertelstunden an Zeitumstellungstagen; Anzeige erfolgt in Europe/Berlin. Doppelte Grenzauswahl wird entfernt. Minuten in API-Zeitgrenzen bleiben erhalten; Netzwerkfehler geben keine Token-URL aus.
 
-1. **Renewables** — Solar, Wind Onshore, Wind Offshore and complete RES total. Actual generation is compared with ENTSO-E A18 (current/latest), the fixed A40 **08:00 delivery-day intraday snapshot**, and the fixed A01 **18:00 D-1 day-ahead snapshot**. Where available, the UI also shows the document creation timestamp as separate metadata. Scope: **DE Member State**.
-2. **Load / residual load** — actual load and residual load against a consistent A01 day-ahead baseline. Scope: **DE Member State**.
-3. **Cross-border** — physical DE-LU flows versus day-ahead schedules. Missing borders or missing MTUs are **not silently converted to 0 MW**. The Total KPI/trace is suppressed unless every selected border contributes data on the same timestamp. Scope: **DE-LU bidding zone**.
-4. **Generation outages** — A80 generation-unit outages are primary. A77 production-unit outages are only a fallback when A80 explicitly has no data for a zone; A77 and A80 are never added together. Queries paginate the ENTSO-E 200-document pages, keep the latest document revision, suppress cancelled/withdrawn documents and suppress the numeric total when source coverage is incomplete.
-5. **Balancing / imbalance** — the retired legacy A83 activation feed has been removed. Activated aFRR/mFRR now uses **GL EB 12.3.E / A24 Aggregated Balancing Energy Bids** with A51 (aFRR) and A47 (mFRR). A86 Total Imbalance Volume remains a separate MWh KPI and is never mixed with MW activation data. A85 prices remain separate.
+## Start
 
-The common ENTSO-E time-series parser also understands **curveType A03 variable-size blocks** and expands omitted positions by carrying the published block value forward to the next explicit point/end of period. That prevents artificial gaps/jumps in R3-migrated feeds.
-
-## Public-hosting safeguards
-
-The dashboard is public by default when `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` are unset.
-
-- `ENTSOE_API_KEY` stays server-side.
-- Public API endpoints no longer accept a `force=true` cache-bypass parameter.
-- The old public cache-clear endpoint has been removed.
-- `Refresh now` refreshes the browser view but respects the server cache (default 240 s).
-- `/health` exposes only health/version/configured state, not token values or endpoint secrets.
-
-Optional HTTP Basic Auth is still supported locally or on a host by manually adding both `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` environment variables.
-
-## Run locally with Docker
-
-Copy the example environment file:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-or on macOS/Linux:
+Python 3.12 oder 3.13:
 
 ```bash
-cp .env.example .env
+python -m venv .venv
+# Umgebung aktivieren
+pip install -r requirements.txt
+# .env.example nach .env kopieren und ENTSOE_API_KEY lokal setzen
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Set at least:
-
-```text
-ENTSOE_API_KEY=your_token_here
-```
-
-Then:
-
-```bash
-docker compose up --build
-```
-
-Open `http://localhost:8000`.
-
-## Run without Docker
-
-Python 3.11+ is recommended.
-
-Windows PowerShell:
-
-```powershell
-Copy-Item .env.example .env
-# edit .env
-.\run.ps1
-```
-
-macOS/Linux:
-
-```bash
-cp .env.example .env
-# edit .env
-./run.sh
-```
-
-## Configuration
-
-```text
-ENTSOE_API_KEY=...
-ENTSOE_ENDPOINT_URL=https://web-api.tp.entsoe.eu/api
-ENTSOE_REFRESH_SECONDS=300
-ENTSOE_CACHE_SECONDS=240
-ENTSOE_CACHE_MAX_ENTRIES=256
-ENTSOE_HTTP_TIMEOUT=35
-ENTSOE_MAX_REQUESTS_PER_MINUTE=300
-PORT=8000
-
-# optional, only if you want Basic Auth
-DASHBOARD_USERNAME=
-DASHBOARD_PASSWORD=
-```
-
-## ENTSO-E data choices
-
-- Renewable forecasts: A69 with A18 current/latest / A40 fixed 08:00 intraday snapshot / A01 fixed 18:00 D-1 day-ahead snapshot
-- Actual renewable generation: A75 / A16
-- Load actual / forecast: A65 / A16 + A01
-- Physical cross-border flows: A11
-- Day-ahead scheduled exchanges: A09 / A01 contract
-- Generation-unit unavailability: A80 primary
-- Production-unit unavailability: A77 fallback only
-- Activated balancing energy: A24 / GL EB 12.3.E, A51 aFRR + A47 mFRR
-- Imbalance prices: A85
-- Total imbalance volume: A86
-
-## KPI semantics
-
-- **RES forecast error** = actual complete RES − freshest available complete RES forecast at the same MTU.
-- **Next 4h RES revision** = current A18 RES forecast − A01 day-ahead RES forecast over the next four delivery hours.
-- **Residual load** = actual load − actual RES.
-- **Residual surprise** = actual residual load − A01 day-ahead residual forecast.
-- **Net physical import** = selected physical inflows to DE-LU − physical outflows, but only when the selected-border total is complete.
-- **Unavailable capacity** = selected reportable outage unavailable MW at the reference time. A numeric total is withheld if outage retrieval is incomplete.
-- **System imbalance** = A86 Total Imbalance Volume in MWh. Positive/negative direction is shown as surplus/excess versus deficit according to the source direction convention.
-- **Activated balancing** = separate 12.3.E aFRR/mFRR MW series; it is not a fallback for A86.
+Alternativ: `docker compose up --build`. Render nutzt den bestehenden Dockerfile, `PORT` und `/health`. Der Schlüssel gehört ausschließlich in Render Environment oder eine lokale `.env`.
 
 ## Tests
 
-From the project folder:
-
 ```bash
+pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
+python scripts/live_smoke.py --env-file /path/to/.env --day 2026-09-10 --output live-audit.json
+python scripts/smoke_http.py --base-url http://127.0.0.1:8000 --day 2026-09-10
 ```
 
-v4.3 includes tests for A03 block expansion, forecast-process separation, complete RES aggregation, gap-safe border aggregation, outage cancellation/revision handling, A80-vs-A77 hierarchy handling, unique outage event counting, A24/12.3.E parsing, unit-stable A86 balancing KPIs and removal of public cache bypass controls.
+Der Live-Abgleich ist eine Regression für einen vollständig veröffentlichten Tag mit den beim Audit beobachteten Quellen. Historische Revisionen oder andere Gebietspublikationen können Vergleichsannahmen ändern und den Test gezielt fehlschlagen lassen. Die normalen Unit-Tests benötigen weder Schlüssel noch Netz.
 
-## Deploy / upgrade on Render
+## Datenumfang und Grenzen
 
-See `DEPLOY-RENDER.md`.
+- Panel 1: DE Member State, A75/A16 sowie A69/A01/A18/A40, B16/B18/B19; Erzeugungsverbrauch wird ausgeschlossen.
+- Panel 2: DE Member State, A65/A16 und A01; Residuallast ist Last minus vollständige Solar-/Wind-Summe. Der DA-Vergleich benutzt DA für Last und Erneuerbare.
+- Panel 3: DE-LU, elf ausgewählte Grenzen, A11 und A09 mit DA-Vertrag A01. Die API liefert Richtungswerte; Import minus Export ist die Nettozahl. Eine explizit nicht publizierte Gegenrichtung wird als `single_direction` ausgewiesen; Fehler und Lücken zwischen vorhandenen Reihen werden nicht aufgefüllt.
+- Panel 4: bewusst A80 primär und A77 nur als Zonen-Fallback, wie im bisherigen Desk. Das vermeidet Hierarchie-Doppelzählung, kann aber zusätzliche, ausschließlich auf Anlagenebene publizierte A77-Ereignisse auslassen. `coverage_complete` bezeichnet die vollständige Erfassung dieses ausgewählten Quellenumfangs, kein vollständiges Kraftwerksregister.
+- Panel 5: publizierte A24-Kanäle der vier LFA/SCA. Fehlende lokale aFRR- oder andere Prozesspublikationen bleiben im Quellenstatus sichtbar; `no_data` ist keine Bestätigung physischer Nullaktivierung. Fehlende sekundäre Mengen werden nie aus angebotenen Mengen abgeleitet.
+- `createdDateTime` kann die Erstellung des API-Dokuments angeben und ist kein gesicherter ursprünglicher Prognose-Publikationszeitpunkt.
+- Kalendarische Auflösungen P1M/P1Y werden ausdrücklich abgelehnt statt als 15 Minuten fehlinterpretiert. Für die geprüften Tagesabfragen kamen feste Auflösungen zurück.
 
-## Responsive/mobile behavior
-
-The site adapts to viewport width rather than trying to identify iPhone/Android user agents. CSS breakpoints, larger touch controls and responsive Plotly layouts cover phones, tablets, split-screen and orientation changes.
-
-## Operational note
-
-This is a monitoring dashboard, not a settlement-grade or automated trading system. ENTSO-E data can be delayed, revised or absent. v4.3 deliberately prefers **missing/partial** over a plausible-looking but unjustified zero or aggregate.
+Details, Quellen, Live-Ergebnisse und nicht ausgeführte Prüfungen: **AUDIT-v4.4.md**. Upgrade: **DEPLOY-RENDER.md**.

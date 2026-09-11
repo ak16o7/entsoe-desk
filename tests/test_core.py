@@ -189,10 +189,14 @@ class CoreTests(unittest.TestCase):
         volume = [{'ts':t0, 'value':120.0, 'business':None, 'direction':'A01', 'category':None, 'source_area':'50HERTZ', 'revision':'1', 'created':'2026-08-28T12:01Z'}]
         price = [{'ts':t0, 'value':88.0, 'business':None, 'direction':None, 'category':None, 'source_area':'50HERTZ', 'revision':'1', 'created':'2026-08-28T12:01Z'}]
 
-        def fake_bids(process, start, end):
-            return (afrr if process == 'A51' else mfrr), 'ok'
+        def fake_bids(process, start, end, area):
+            if process not in ('A51', 'A47'): return [], 'no_data'
+            source = afrr if process == 'A51' else mfrr
+            r = {**source[0], 'source_area':area, 'activated': source[0]['activated']/4}
+            zero = {**r, 'direction':'A02' if r['direction']=='A01' else 'A01', 'activated':0.0}
+            return [r, zero], 'ok' 
         def fake_doc(doc, start, end):
-            return (price, {'50HERTZ':'ok'}, 'German control areas') if doc == 'A85' else (volume, {'50HERTZ':'ok'}, 'German control areas')
+            return (price, {'DE':'ok'}, 'DE') if doc == 'A85' else (volume, {'DE':'ok'}, 'DE')
 
         with patch('app.main._query_aggregated_bids', side_effect=fake_bids), patch('app.main._query_balancing_doc_with_fallback', side_effect=fake_doc):
             data = fetch_balancing('2026-08-28', force=True)
@@ -208,7 +212,7 @@ class CoreTests(unittest.TestCase):
         t0 = datetime(2026, 8, 28, 12, 0, tzinfo=BERLIN)
         volume = [{'ts':t0, 'value':120.0, 'business':None, 'direction':'A01', 'category':None, 'source_area':'50HERTZ', 'revision':'1', 'created':'2026-08-28T12:01Z'}]
 
-        def fake_bids(process, start, end):
+        def fake_bids(process, start, end, area):
             return [], 'no_data'
         def fake_doc(doc, start, end):
             if doc == 'A86':
