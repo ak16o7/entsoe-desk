@@ -46,3 +46,5 @@ Der Live-Abgleich ist eine Regression für einen vollständig veröffentlichten 
 - Kalendarische Auflösungen P1M/P1Y werden ausdrücklich abgelehnt statt als 15 Minuten fehlinterpretiert. Für die geprüften Tagesabfragen kamen feste Auflösungen zurück.
 
 Details, Quellen, Live-Ergebnisse und nicht ausgeführte Prüfungen: **AUDIT-v4.4.md**. Upgrade: **DEPLOY-RENDER.md**.
+
+Live Website: https://entsoe-desk.onrender.com/
